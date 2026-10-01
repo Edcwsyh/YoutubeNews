@@ -4,9 +4,7 @@ import os
 import sys
 import time
 
-import yt_dlp
-from faster_whisper import WhisperModel
-
+from whisper_utils import download_audio, split_audio, transcribe_segments
 
 STATE_FILE = "/tmp/yt_monitor_state.json"
 
@@ -24,6 +22,7 @@ def save_state(state):
 
 
 def fetch_channel_videos(url, max_results=5):
+    import yt_dlp
     ydl_opts = {
         "quiet": True,
         "simulate": True,
@@ -41,53 +40,6 @@ def fetch_channel_videos(url, max_results=5):
             "url": f"https://www.youtube.com/watch?v={v.get('id')}",
         })
     return result
-
-
-def download_and_transcribe(url, model="base", work_dir="/tmp/yt_transcribe"):
-    audio_file = download_audio(url, work_dir)
-    segment_files = split_audio(audio_file, work_dir, segment_seconds=300)
-    transcribe_segments(segment_files, model, f"{work_dir}/transcript.txt")
-
-
-def download_audio(url, output_dir):
-    os.makedirs(output_dir, exist_ok=True)
-    ydl_opts = {
-        "format": "bestaudio",
-        "outtmpl": os.path.join(output_dir, "audio.%(ext)s"),
-        "quiet": True,
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-    audio_file = ydl.prepare_filename(info)
-    if not os.path.exists(audio_file):
-        audio_files = __import__("glob").glob(os.path.join(output_dir, "audio.*"))
-        if not audio_files:
-            raise FileNotFoundError("Audio file not found")
-        audio_file = audio_files[0]
-    return audio_file
-
-
-def split_audio(audio_file, output_dir, segment_seconds=300):
-    os.makedirs(output_dir, exist_ok=True)
-    pattern = os.path.join(output_dir, "seg_%03d.webm")
-    subprocess = __import__("subprocess")
-    subprocess.run(
-        ["ffmpeg", "-i", audio_file, "-f", "segment", "-segment_time", str(segment_seconds),
-         "-c", "copy", pattern],
-        check=True,
-        capture_output=True,
-    )
-    return sorted(__import__("glob").glob(os.path.join(output_dir, "seg_*.webm")))
-
-
-def transcribe_segments(segment_files, model_name, output_file):
-    model = WhisperModel(model_name, device="cpu", compute_type="int8")
-    with open(output_file, "w", encoding="utf-8") as f:
-        for i, seg_file in enumerate(segment_files):
-            segments, _ = model.transcribe(seg_file, vad_filter=True)
-            for seg in segments:
-                f.write(seg.text.strip() + "\n")
-            f.flush()
 
 
 def main():
@@ -125,5 +77,12 @@ def main():
         time.sleep(args.check_interval)
 
 
-if __name__ == "__main__":
-    main()
+def download_and_transcribe(channel_url, model):
+    work_dir = "/tmp/yt_transcribe"
+    audio_file = download_audio(channel_url, work_dir)
+    print(f"Audio downloaded: {audio_file}")
+
+    segment_files = split_audio(audio_file, work_dir, segment_seconds=300)
+    print(f"Split into {len(segment_files)} segments")
+
+    transcribe_segments(segment_files, model, f"{work_dir}/transcript.txt")
