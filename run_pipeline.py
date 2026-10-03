@@ -1,5 +1,6 @@
 import argparse
 import json
+import logging
 import subprocess
 import sys
 import os
@@ -9,6 +10,26 @@ from datetime import datetime
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
 ARCHIVE_DIR = os.path.join(os.path.dirname(__file__), "archive")
+LOG_FILE = os.path.join(os.path.dirname(__file__), "pipeline.log")
+
+
+def setup_logging(level=logging.INFO):
+    """配置日志：同时输出到控制台和文件"""
+    log_format = "%(asctime)s | %(levelname)-8s | %(message)s"
+    date_format = "%Y-%m-%d %H:%M:%S"
+
+    handlers = [
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+    ]
+
+    logging.basicConfig(
+        level=level,
+        format=log_format,
+        datefmt=date_format,
+        handlers=handlers,
+    )
+    return logging.getLogger(__name__)
 
 
 def load_config():
@@ -16,15 +37,22 @@ def load_config():
         return json.load(f)
 
 
-def run_cmd(cmd, cwd=None):
-    print(f"$ {' '.join(cmd)}")
+def run_cmd(cmd, cwd=None, logger=None):
+    if logger is None:
+        logger = logging.getLogger(__name__)
+    cmd_str = " ".join(cmd)
+    logger.info(f"RUN: {cmd_str}")
     result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
     if result.stdout:
-        print(result.stdout)
+        for line in result.stdout.strip().split("\n"):
+            logger.debug(f"OUT: {line}")
     if result.stderr:
-        print(result.stderr, file=sys.stderr)
+        for line in result.stderr.strip().split("\n"):
+            logger.warning(f"ERR: {line}")
     if result.returncode != 0:
+        logger.error(f"Command failed (exit={result.returncode}): {cmd_str}")
         raise RuntimeError(f"Command failed with exit code {result.returncode}")
+    logger.info(f"OK: {cmd_str}")
     return result
 
 
@@ -43,20 +71,23 @@ def get_next_sequence(archive_dir, base_name, date_str):
     return max_seq + 1
 
 
-def archive_files(base_dir, transcript_file, analysis_file):
+def archive_files(base_dir, transcript_file, analysis_file, logger=None):
     """归档 transcript.txt 和 analysis_result.txt"""
+    if logger is None:
+        logger = logging.getLogger(__name__)
     os.makedirs(ARCHIVE_DIR, exist_ok=True)
     date_str = datetime.now().strftime("%Y%m%d")
 
     for src_file, base_name in [(transcript_file, "transcript"), (analysis_file, "analysis")]:
         if not os.path.exists(src_file):
+            logger.warning(f"源文件不存在，跳过归档: {src_file}")
             continue
         seq = get_next_sequence(ARCHIVE_DIR, base_name, date_str)
         ext = os.path.splitext(src_file)[1]
         dst_name = f"{base_name}_{date_str}_{seq}{ext}"
         dst_path = os.path.join(ARCHIVE_DIR, dst_name)
         shutil.copy2(src_file, dst_path)
-        print(f"归档: {dst_name}")
+        logger.info(f"归档: {dst_name} <- {src_file}")
 
 
 def main():
@@ -66,46 +97,59 @@ def main():
     parser.add_argument("--work-dir", default="/tmp/yt_transcribe", help="工作目录")
     parser.add_argument("--skip-transcribe", action="store_true", help="跳过转写，直接用现有transcript.txt")
     parser.add_argument("--skip-archive", action="store_true", help="跳过归档")
+    parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                        help="日志级别")
     args = parser.parse_args()
+
+    logger = setup_logging(getattr(logging, args.log_level))
+
+    logger.info("=" * 50)
+    logger.info("流水线启动")
+    logger.info(f"参数: url={args.url}, model={args.model}, work_dir={args.work_dir}, "
+                f"skip_transcribe={args.skip_transcribe}, skip_archive={args.skip_archive}")
 
     config = load_config()
     url = args.url or config.get("youtube_channel_url")
     if not url or url == "https://www.youtube.com/@channel_name":
-        print("错误: 请提供YouTube URL或在config.json中配置youtube_channel_url")
+        logger.error("未提供YouTube URL，且config.json中未配置youtube_channel_url")
         sys.exit(1)
+
+    logger.info(f"使用URL: {url}")
 
     base_dir = "/home/Edcwsyh/work"
     transcript_file = os.path.join(base_dir, "transcript.txt")
     analysis_file = os.path.join(base_dir, "analysis_result.txt")
 
     if not args.skip_transcribe:
-        print("=== 步骤1: 下载音频并转写 ===")
+        logger.info("=== 步骤1: 下载音频并转写 ===")
         run_cmd([
             sys.executable, "youtube_transcribe.py", url,
             "--model", args.model,
             "--output", transcript_file,
             "--work-dir", args.work_dir
-        ], cwd=base_dir)
+        ], cwd=base_dir, logger=logger)
 
     if not os.path.exists(transcript_file):
-        print(f"错误: 未找到 {transcript_file}")
+        logger.error(f"未找到转写文件: {transcript_file}")
         sys.exit(1)
+    logger.info(f"转写文件已就绪: {transcript_file} ({os.path.getsize(transcript_file)} bytes)")
 
-    print("=== 步骤2: AI分析生成报告 ===")
-    run_cmd([sys.executable, "-m", "opencode", "skill", "newsanalysis"], cwd=base_dir)
+    logger.info("=== 步骤2: AI分析生成报告 ===")
+    run_cmd([sys.executable, "-m", "opencode", "skill", "newsanalysis"], cwd=base_dir, logger=logger)
 
     if not os.path.exists(analysis_file):
-        print(f"错误: 未生成 {analysis_file}")
+        logger.error(f"未生成分析报告: {analysis_file}")
         sys.exit(1)
+    logger.info(f"分析报告已生成: {analysis_file} ({os.path.getsize(analysis_file)} bytes)")
 
-    print("=== 步骤3: 推送到Telegram ===")
-    run_cmd([sys.executable, "telegram_push.py", analysis_file], cwd=base_dir)
+    logger.info("=== 步骤3: 推送到Telegram ===")
+    run_cmd([sys.executable, "telegram_push.py", analysis_file], cwd=base_dir, logger=logger)
 
     if not args.skip_archive:
-        print("=== 步骤4: 归档文件 ===")
-        archive_files(base_dir, transcript_file, analysis_file)
+        logger.info("=== 步骤4: 归档文件 ===")
+        archive_files(base_dir, transcript_file, analysis_file, logger=logger)
 
-    print("=== 流水线完成 ===")
+    logger.info("=== 流水线完成 ===")
 
 
 if __name__ == "__main__":
