@@ -74,6 +74,73 @@ def extract_video_id(url):
     return None
 
 
+def extract_video_id(url):
+    """从 YouTube URL 提取 video_id"""
+    import re
+    # watch?v=xxx 格式
+    m = re.search(r"[?&]v=([^&]+)", url)
+    if m:
+        return m.group(1)
+    # youtu.be/xxx 格式
+    m = re.search(r"youtu\.be/([^?&]+)", url)
+    if m:
+        return m.group(1)
+    return None
+
+
+def is_live_stream(video_url, logger=None):
+    """检查视频是否为正在直播的流（排除已结束的直播回放 VOD）"""
+    if logger is None:
+        logger = logging.getLogger(__name__)
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["yt-dlp", "--skip-download", "--print", "%(live_status)s|%(concurrent_view_count)s|%(release_timestamp)s", video_url],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            parts = result.stdout.strip().split("|")
+            if len(parts) >= 3:
+                live_status = parts[0].strip().lower()
+                concurrent = parts[1].strip()
+                release_ts = parts[2].strip()
+                
+                if live_status in ("is_live", "live"):
+                    # 判断是正在直播还是已结束的直播回放
+                    # 如果 release_timestamp 存在且在过去，说明是 VOD
+                    # 如果 concurrent_view_count 是 NA，可能是普通视频
+                    import time
+                    try:
+                        if release_ts and release_ts != "NA":
+                            release_time = int(release_ts)
+                            if release_time < time.time():
+                                logger.debug(f"视频为已结束的直播回放 (release_timestamp 在过去): {video_url}")
+                                return False
+                    except ValueError:
+                        pass
+                    
+                    # 如果 concurrent_view_count 是数字且较大，可能正在直播
+                    # 但 VOD 也可能有观看人数，所以不能只靠这个
+                    # 最稳妥：如果 release_timestamp 在未来，才是正在直播
+                    try:
+                        if release_ts and release_ts != "NA":
+                            release_time = int(release_ts)
+                            if release_time > time.time():
+                                logger.warning(f"检测到正在直播的视频 (未来 release_timestamp)，跳过: {video_url}")
+                                return True
+                    except ValueError:
+                        pass
+                    
+                    logger.debug(f"视频标记为 is_live 但无法确定是否正在直播，当作 VOD 处理: {video_url}")
+                    return False
+                logger.debug(f"视频直播状态: {live_status}")
+    except Exception as e:
+        logger.debug(f"检查直播状态失败: {e}")
+    return False
+
+
 def is_channel_url(url):
     """判断是否为频道URL"""
     return any(pattern in url for pattern in ["/@", "/channel/", "/user/", "/c/"])
@@ -259,6 +326,11 @@ def run_pipeline_once(url, args, logger, config):
     video_id = extract_video_id(url)
     if video_id:
         logger.info(f"视频ID: {video_id}")
+
+    # 检查是否为正在直播
+    if not args.skip_transcribe and is_live_stream(url, logger=logger):
+        logger.info("检测到正在直播，跳过本次处理")
+        return False, video_id
 
     base_dir = "/home/Edcwsyh/work"
     transcript_file = os.path.join(base_dir, "transcript.txt")
