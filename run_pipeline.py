@@ -5,6 +5,7 @@ import subprocess
 import sys
 import os
 import shutil
+import yt_dlp
 from datetime import datetime
 
 
@@ -35,6 +36,47 @@ def setup_logging(level=logging.INFO):
 def load_config():
     with open(CONFIG_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def is_channel_url(url):
+    """判断是否为频道URL"""
+    return any(pattern in url for pattern in ["/@", "/channel/", "/user/", "/c/"])
+
+
+def resolve_channel_to_latest_video(channel_url, logger=None):
+    """解析频道URL，获取最新视频的URL"""
+    if logger is None:
+        logger = logging.getLogger(__name__)
+    logger.info(f"解析频道获取最新视频: {channel_url}")
+
+    # 统一转为 /videos 标签页
+    if "/@" in channel_url and not channel_url.endswith("/videos"):
+        if channel_url.endswith("/"):
+            channel_url = channel_url.rstrip("/")
+        channel_url = f"{channel_url}/videos"
+    elif "/channel/" in channel_url or "/user/" in channel_url or "/c/" in channel_url:
+        if not channel_url.endswith("/videos"):
+            channel_url = channel_url.rstrip("/") + "/videos"
+
+    logger.info(f"使用视频列表页: {channel_url}")
+
+    ydl_opts = {
+        "quiet": True,
+        "simulate": True,
+        "extract_flat": True,
+        "flat_playlist": True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(channel_url, download=False)
+    videos = info.get("entries", [])
+    if not videos:
+        raise RuntimeError(f"未能从频道获取视频列表: {channel_url}")
+    latest = videos[0]
+    video_id = latest.get("id")
+    video_title = latest.get("title")
+    video_url = f"https://www.youtube.com/watch?v={video_id}"
+    logger.info(f"获取到最新视频: {video_title} ({video_url})")
+    return video_url
 
 
 def run_cmd(cmd, cwd=None, logger=None):
@@ -116,6 +158,12 @@ def main():
 
     logger.info(f"使用URL: {url}")
 
+    # 如果是频道URL，解析获取最新视频URL
+    if is_channel_url(url):
+        logger.info("检测到频道URL，正在解析最新视频...")
+        url = resolve_channel_to_latest_video(url, logger=logger)
+        logger.info(f"将使用视频URL: {url}")
+
     base_dir = "/home/Edcwsyh/work"
     transcript_file = os.path.join(base_dir, "transcript.txt")
     analysis_file = os.path.join(base_dir, "analysis_result.txt")
@@ -135,7 +183,7 @@ def main():
     logger.info(f"转写文件已就绪: {transcript_file} ({os.path.getsize(transcript_file)} bytes)")
 
     logger.info("=== 步骤2: AI分析生成报告 ===")
-    run_cmd([sys.executable, "-m", "opencode", "skill", "newsanalysis"], cwd=base_dir, logger=logger)
+    run_cmd([sys.executable, "run_analysis.py"], cwd=base_dir, logger=logger)
 
     if not os.path.exists(analysis_file):
         logger.error(f"未生成分析报告: {analysis_file}")
