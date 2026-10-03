@@ -5,6 +5,7 @@ import subprocess
 import sys
 import os
 import shutil
+import time
 import yt_dlp
 from datetime import datetime
 
@@ -12,6 +13,7 @@ from datetime import datetime
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
 ARCHIVE_DIR = os.path.join(os.path.dirname(__file__), "archive")
 LOG_FILE = os.path.join(os.path.dirname(__file__), "pipeline.log")
+STATE_FILE = os.path.join(os.path.dirname(__file__), ".pipeline_state.json")
 
 
 def setup_logging(level=logging.INFO):
@@ -36,6 +38,40 @@ def setup_logging(level=logging.INFO):
 def load_config():
     with open(CONFIG_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def load_state():
+    """加载流水线状态（记录最后处理的视频ID）"""
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"last_video_id": None}
+
+
+def save_state(state):
+    """保存流水线状态"""
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"保存状态失败: {e}")
+
+
+def extract_video_id(url):
+    """从 YouTube URL 提取 video_id"""
+    import re
+    # watch?v=xxx 格式
+    m = re.search(r"[?&]v=([^&]+)", url)
+    if m:
+        return m.group(1)
+    # youtu.be/xxx 格式
+    m = re.search(r"youtu\.be/([^?&]+)", url)
+    if m:
+        return m.group(1)
+    return None
 
 
 def is_channel_url(url):
@@ -207,37 +243,22 @@ def archive_files(base_dir, transcript_file, analysis_file, logger=None):
         logger.info(f"归档: {dst_name} <- {src_file}")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="完整流水线：下载转写 -> AI分析 -> Telegram推送 -> 归档")
-    parser.add_argument("url", nargs="?", help="YouTube视频/频道URL（不传则读取配置文件）")
-    parser.add_argument("--model", default="base", choices=["tiny", "base", "small", "medium", "large-v3"])
-    parser.add_argument("--work-dir", default="/tmp/yt_transcribe", help="工作目录")
-    parser.add_argument("--skip-transcribe", action="store_true", help="跳过转写，直接用现有transcript.txt")
-    parser.add_argument("--skip-archive", action="store_true", help="跳过归档")
-    parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-                        help="日志级别")
-    args = parser.parse_args()
-
-    logger = setup_logging(getattr(logging, args.log_level))
-
+def run_pipeline_once(url, args, logger, config):
+    """执行单次流水线"""
     logger.info("=" * 50)
     logger.info("流水线启动")
-    logger.info(f"参数: url={args.url}, model={args.model}, work_dir={args.work_dir}, "
+    logger.info(f"参数: url={url}, model={args.model}, work_dir={args.work_dir}, "
                 f"skip_transcribe={args.skip_transcribe}, skip_archive={args.skip_archive}")
-
-    config = load_config()
-    url = args.url or config.get("youtube_channel_url")
-    if not url or url == "https://www.youtube.com/@channel_name":
-        logger.error("未提供YouTube URL，且config.json中未配置youtube_channel_url")
-        sys.exit(1)
-
-    logger.info(f"使用URL: {url}")
 
     # 如果是频道URL，解析获取最新视频URL
     if is_channel_url(url):
         logger.info("检测到频道URL，正在解析最新视频...")
         url = resolve_channel_to_latest_video(url, logger=logger)
         logger.info(f"将使用视频URL: {url}")
+
+    video_id = extract_video_id(url)
+    if video_id:
+        logger.info(f"视频ID: {video_id}")
 
     base_dir = "/home/Edcwsyh/work"
     transcript_file = os.path.join(base_dir, "transcript.txt")
@@ -258,7 +279,7 @@ def main():
 
     if not os.path.exists(transcript_file):
         logger.error(f"未找到转写文件: {transcript_file}")
-        sys.exit(1)
+        return False, None
     logger.info(f"转写文件已就绪: {transcript_file} ({os.path.getsize(transcript_file)} bytes)")
 
     logger.info("=== 步骤2: AI分析生成报告 ===")
@@ -269,7 +290,7 @@ def main():
 
     if not os.path.exists(analysis_file):
         logger.error(f"未生成分析报告: {analysis_file}")
-        sys.exit(1)
+        return False, video_id
     logger.info(f"分析报告已生成: {analysis_file} ({os.path.getsize(analysis_file)} bytes)")
 
     logger.info("=== 步骤3: 推送到Telegram ===")
@@ -280,6 +301,75 @@ def main():
         archive_files(base_dir, transcript_file, analysis_file, logger=logger)
 
     logger.info("=== 流水线完成 ===")
+    return True, video_id
+
+
+def main():
+    parser = argparse.ArgumentParser(description="完整流水线：下载转写 -> AI分析 -> Telegram推送 -> 归档")
+    parser.add_argument("url", nargs="?", help="YouTube视频/频道URL（不传则读取配置文件）")
+    parser.add_argument("--model", default="base", choices=["tiny", "base", "small", "medium", "large-v3"])
+    parser.add_argument("--work-dir", default="/tmp/yt_transcribe", help="工作目录")
+    parser.add_argument("--skip-transcribe", action="store_true", help="跳过转写，直接用现有transcript.txt")
+    parser.add_argument("--skip-archive", action="store_true", help="跳过归档")
+    parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                        help="日志级别")
+    parser.add_argument("--monitor", action="store_true", help="持续监听模式，定期检查新视频")
+    parser.add_argument("--interval", type=int, default=300, help="监听模式下的检查间隔(秒，默认300)")
+    args = parser.parse_args()
+
+    logger = setup_logging(getattr(logging, args.log_level))
+
+    config = load_config()
+    url = args.url or config.get("youtube_channel_url")
+    if not url or url == "https://www.youtube.com/@channel_name":
+        logger.error("未提供YouTube URL，且config.json中未配置youtube_channel_url")
+        sys.exit(1)
+
+    # 单次运行模式
+    if not args.monitor:
+        success, _ = run_pipeline_once(url, args, logger, config)
+        sys.exit(0 if success else 1)
+
+    # 监听模式
+    logger.info("=" * 50)
+    logger.info(f"启动监听模式: 检查间隔={args.interval}秒, URL={url}")
+    logger.info("按 Ctrl+C 停止")
+
+    state = load_state()
+    last_video_id = state.get("last_video_id")
+
+    try:
+        while True:
+            logger.info("-" * 50)
+            logger.info("检查新视频...")
+
+            # 解析最新视频
+            check_url = url
+            if is_channel_url(check_url):
+                check_url = resolve_channel_to_latest_video(check_url, logger=logger)
+
+            current_video_id = extract_video_id(check_url)
+            logger.info(f"最新视频ID: {current_video_id}, 上次处理: {last_video_id}")
+
+            if current_video_id and current_video_id != last_video_id:
+                logger.info(f"检测到新视频: {current_video_id}")
+                success, new_video_id = run_pipeline_once(check_url, args, logger, config)
+                if success and new_video_id:
+                    last_video_id = new_video_id
+                    state["last_video_id"] = last_video_id
+                    save_state(state)
+                    logger.info(f"已更新状态: last_video_id={last_video_id}")
+            else:
+                logger.info("无新视频，跳过")
+
+            logger.info(f"等待 {args.interval} 秒后下次检查...")
+            time.sleep(args.interval)
+
+    except KeyboardInterrupt:
+        logger.info("收到中断信号，退出监听模式")
+    except Exception as e:
+        logger.error(f"监听模式异常: {e}")
+        raise
 
 
 if __name__ == "__main__":

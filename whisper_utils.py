@@ -6,6 +6,14 @@ import logging
 import yt_dlp
 from faster_whisper import WhisperModel
 
+try:
+    from opencc import OpenCC
+    _opencc_available = True
+    _cc = OpenCC('t2s')  # 繁体 -> 简体
+except ImportError:
+    _opencc_available = False
+    _cc = None
+
 
 def get_logger(name="whisper_utils"):
     logger = logging.getLogger(name)
@@ -15,6 +23,13 @@ def get_logger(name="whisper_utils"):
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
     return logger
+
+
+def _to_simplified(text: str) -> str:
+    """将繁体中文转为简体"""
+    if _opencc_available and _cc:
+        return _cc.convert(text)
+    return text
 
 
 def download_audio(url, output_dir, logger=None):
@@ -83,7 +98,7 @@ def transcribe_segments(segment_files, model_name="base", output_file=None, logg
         results.append((segments, info))
         if write_to_file:
             for seg in segments:
-                f.write(seg.text.strip() + "\n")
+                f.write(_to_simplified(seg.text.strip()) + "\n")
             f.flush()
         logger.debug(f"  片段 {i+1} 完成: {len(segments)} 个语音段")
 
