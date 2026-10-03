@@ -43,40 +43,115 @@ def is_channel_url(url):
     return any(pattern in url for pattern in ["/@", "/channel/", "/user/", "/c/"])
 
 
-def resolve_channel_to_latest_video(channel_url, logger=None):
-    """解析频道URL，获取最新视频的URL"""
+def resolve_channel_to_latest_video(channel_url, logger=None, max_age_hours=12):
+    """解析频道URL，获取最新视频的URL（用 RSS 极速获取，过滤最近 N 小时，排除 Shorts）"""
     if logger is None:
         logger = logging.getLogger(__name__)
     logger.info(f"解析频道获取最新视频: {channel_url}")
 
-    # 统一转为 /videos 标签页
-    if "/@" in channel_url and not channel_url.endswith("/videos"):
-        if channel_url.endswith("/"):
-            channel_url = channel_url.rstrip("/")
-        channel_url = f"{channel_url}/videos"
-    elif "/channel/" in channel_url or "/user/" in channel_url or "/c/" in channel_url:
-        if not channel_url.endswith("/videos"):
-            channel_url = channel_url.rstrip("/") + "/videos"
+    import requests
+    import xml.etree.ElementTree as ET
+    from datetime import datetime, timezone, timedelta
+    import re
 
-    logger.info(f"使用视频列表页: {channel_url}")
+    # 1. 从 handle URL 提取 channel ID
+    if "/@" in channel_url:
+        handle_url = channel_url.rstrip("/")
+        logger.debug(f"获取频道页面: {handle_url}")
+        resp = requests.get(handle_url, timeout=10)
+        resp.raise_for_status()
+        # 从页面提取 channel ID
+        match = re.search(r'channel/(UC[0-9A-Za-z_-]{22})', resp.text)
+        if not match:
+            raise RuntimeError(f"无法从页面提取 channel ID: {handle_url}")
+        channel_id = match.group(1)
+        logger.info(f"解析到 Channel ID: {channel_id}")
+    elif "/channel/" in channel_url:
+        channel_id = channel_url.split("/channel/")[-1].split("/")[0]
+    else:
+        raise RuntimeError(f"不支持的频道 URL 格式: {channel_url}")
 
-    ydl_opts = {
-        "quiet": True,
-        "simulate": True,
-        "extract_flat": True,
-        "flat_playlist": True,
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(channel_url, download=False)
-    videos = info.get("entries", [])
-    if not videos:
-        raise RuntimeError(f"未能从频道获取视频列表: {channel_url}")
-    latest = videos[0]
-    video_id = latest.get("id")
-    video_title = latest.get("title")
-    video_url = f"https://www.youtube.com/watch?v={video_id}"
-    logger.info(f"获取到最新视频: {video_title} ({video_url})")
-    return video_url
+    # 2. 请求 RSS feed（主频道 feed，包含所有内容，后续过滤 Shorts）
+    rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+    logger.debug(f"请求 RSS: {rss_url}")
+    resp = requests.get(rss_url, timeout=10)
+    resp.raise_for_status()
+
+    # 3. 解析 XML
+    root = ET.fromstring(resp.content)
+    ns = {"atom": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015"}
+
+    # 4. 遍历 entry，找最近 max_age_hours 小时内的非 Shorts 视频
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+    logger.debug(f"时间截止线: {cutoff.isoformat()}")
+
+    for entry in root.findall("atom:entry", ns):
+        video_id_elem = entry.find("yt:videoId", ns)
+        title_elem = entry.find("atom:title", ns)
+        published_elem = entry.find("atom:published", ns)
+        link_elem = entry.find("atom:link", ns)
+
+        if video_id_elem is None or title_elem is None:
+            continue
+
+        video_id = video_id_elem.text
+        title = title_elem.text
+
+        # 解析发布时间
+        published_str = published_elem.text if published_elem is not None else None
+        if published_str:
+            try:
+                published = datetime.fromisoformat(published_str.replace("Z", "+00:00"))
+            except ValueError:
+                published = datetime.now(timezone.utc)
+        else:
+            published = datetime.now(timezone.utc)
+
+        # 过滤 Shorts：检查链接或标题
+        is_short = False
+        if link_elem is not None:
+            href = link_elem.get("href", "")
+            if "/shorts/" in href:
+                is_short = True
+        if "#shorts" in title.lower() or "#shortsvideo" in title.lower():
+            is_short = True
+
+        logger.debug(f"候选: {title} ({video_id}) @ {published.isoformat()} short={is_short}")
+
+        if is_short:
+            continue
+
+        if published >= cutoff:
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+            logger.info(f"获取到最新视频 (最近 {max_age_hours}h): {title} ({video_url})")
+            return video_url
+
+    # 如果最近 N 小时没有视频，返回最新的非 Shorts 视频
+    for entry in root.findall("atom:entry", ns):
+        video_id_elem = entry.find("yt:videoId", ns)
+        title_elem = entry.find("atom:title", ns)
+        link_elem = entry.find("atom:link", ns)
+
+        if video_id_elem is None or title_elem is None:
+            continue
+
+        video_id = video_id_elem.text
+        title = title_elem.text
+
+        is_short = False
+        if link_elem is not None:
+            href = link_elem.get("href", "")
+            if "/shorts/" in href:
+                is_short = True
+        if "#shorts" in title.lower() or "#shortsvideo" in title.lower():
+            is_short = True
+
+        if not is_short:
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+            logger.warning(f"最近 {max_age_hours}h 无新视频，回退到最新非Shorts: {title} ({video_url})")
+            return video_url
+
+    raise RuntimeError(f"RSS 中未找到任何非 Shorts 视频: {rss_url}")
 
 
 def run_cmd(cmd, cwd=None, logger=None):
@@ -170,6 +245,10 @@ def main():
 
     if not args.skip_transcribe:
         logger.info("=== 步骤1: 下载音频并转写 ===")
+        # 清理工作目录
+        if os.path.exists(args.work_dir):
+            logger.info(f"清理工作目录: {args.work_dir}")
+            shutil.rmtree(args.work_dir, ignore_errors=True)
         run_cmd([
             sys.executable, "youtube_transcribe.py", url,
             "--model", args.model,
@@ -183,7 +262,10 @@ def main():
     logger.info(f"转写文件已就绪: {transcript_file} ({os.path.getsize(transcript_file)} bytes)")
 
     logger.info("=== 步骤2: AI分析生成报告 ===")
-    run_cmd([sys.executable, "run_analysis.py"], cwd=base_dir, logger=logger)
+    run_cmd([
+        "opencode", "run",
+        "使用 newsanalysis skill 分析 transcript.txt 并生成 analysis_result.txt"
+    ], cwd=base_dir, logger=logger)
 
     if not os.path.exists(analysis_file):
         logger.error(f"未生成分析报告: {analysis_file}")

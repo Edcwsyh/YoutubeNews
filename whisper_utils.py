@@ -78,7 +78,8 @@ def transcribe_segments(segment_files, model_name="base", output_file=None, logg
 
     for i, seg_file in enumerate(segment_files):
         logger.info(f"转写片段 {i+1}/{len(segment_files)}: {seg_file}")
-        segments, info = model.transcribe(seg_file, vad_filter=True)
+        segments_gen, info = model.transcribe(seg_file, vad_filter=True)
+        segments = list(segments_gen)  # generator -> list
         results.append((segments, info))
         if write_to_file:
             for seg in segments:
