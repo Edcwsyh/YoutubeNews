@@ -2,6 +2,7 @@ import json
 import logging
 import sys
 import html
+import os
 import requests
 
 
@@ -79,9 +80,51 @@ def send_document(bot_token, chat_id, file_path, caption="", logger=None):
     return resp.json()
 
 
+def push_result(result_file, log_level="INFO", logger=None, config=None):
+    """直接可调用的推送函数"""
+    if logger is None:
+        logger = setup_logging(getattr(logging, log_level.upper()))
+    if config is None:
+        config = load_config()
+
+    logger.info(f"开始推送: {result_file}")
+
+    bot_token = config.get("telegram_bot_token")
+    chat_id = config.get("telegram_chat_id")
+
+    if not bot_token or bot_token == "YOUR_BOT_TOKEN_HERE":
+        logger.error("telegram_bot_token 未配置或为默认值")
+        raise ValueError("telegram_bot_token 未配置")
+    if not chat_id or chat_id == "YOUR_CHAT_ID_HERE":
+        logger.error("telegram_chat_id 未配置或为默认值")
+        raise ValueError("telegram_chat_id 未配置")
+
+    logger.debug(f"使用 bot_token={bot_token[:10]}..., chat_id={chat_id}")
+
+    if not os.path.exists(result_file):
+        logger.error(f"文件不存在: {result_file}")
+        raise FileNotFoundError(f"文件不存在: {result_file}")
+
+    with open(result_file, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    max_len = 4000
+    if len(content) <= max_len:
+        safe_content = html.escape(content)
+        try:
+            send_message(bot_token, chat_id, f"<pre>{safe_content}</pre>", logger=logger)
+        except Exception as e:
+            logger.warning(f"发送消息失败，回退为文件发送: {e}")
+            send_document(bot_token, chat_id, result_file, caption="分析报告（消息发送失败，作为文件发送）", logger=logger)
+    else:
+        send_document(bot_token, chat_id, result_file, caption="分析报告（内容过长，作为文件发送）", logger=logger)
+
+    logger.info("推送完成")
+
+
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python telegram_push.py <analysis_result.txt> [--log-level LEVEL]")
+        print("Usage: python telegram_push.py <analysis_result.md> [--log-level LEVEL]")
         sys.exit(1)
 
     # 简单的参数解析
@@ -133,5 +176,4 @@ def main():
 
 
 if __name__ == "__main__":
-    import os
     main()

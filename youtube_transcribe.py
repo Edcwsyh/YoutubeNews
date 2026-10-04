@@ -18,6 +18,27 @@ def setup_logging(level=logging.INFO):
     return logging.getLogger(__name__)
 
 
+def transcribe_video(url, model="base", output="transcript.txt", work_dir="/tmp/yt_transcribe", segment_seconds=300, log_level="INFO", logger=None):
+    """直接可调用的转写函数"""
+    if logger is None:
+        logger = setup_logging(getattr(logging, log_level))
+    whisper_logger = get_logger("whisper_utils")
+    whisper_logger.setLevel(getattr(logging, log_level))
+
+    logger.info(f"开始转写: {url}")
+    logger.debug(f"参数: model={model}, output={output}, work_dir={work_dir}, segment_seconds={segment_seconds}")
+
+    audio_file = download_audio(url, work_dir, logger=whisper_logger)
+    logger.info(f"音频下载完成: {audio_file}")
+
+    segment_files = split_audio(audio_file, work_dir, segment_seconds, logger=whisper_logger)
+    logger.info(f"切分完成: {len(segment_files)} 个片段")
+
+    transcribe_segments(segment_files, model, output, logger=whisper_logger)
+    logger.info(f"转写完成: {output}")
+    return output
+
+
 def main():
     parser = argparse.ArgumentParser(description="YouTube video to text transcription")
     parser.add_argument("url", help="YouTube video URL")
@@ -29,21 +50,7 @@ def main():
                         help="Log level")
     args = parser.parse_args()
 
-    logger = setup_logging(getattr(logging, args.log_level))
-    whisper_logger = get_logger("whisper_utils")
-    whisper_logger.setLevel(getattr(logging, args.log_level))
-
-    logger.info(f"开始转写: {args.url}")
-    logger.debug(f"参数: model={args.model}, output={args.output}, work_dir={args.work_dir}, segment_seconds={args.segment_seconds}")
-
-    audio_file = download_audio(args.url, args.work_dir, logger=whisper_logger)
-    logger.info(f"音频下载完成: {audio_file}")
-
-    segment_files = split_audio(audio_file, args.work_dir, args.segment_seconds, logger=whisper_logger)
-    logger.info(f"切分完成: {len(segment_files)} 个片段")
-
-    transcribe_segments(segment_files, args.model, args.output, logger=whisper_logger)
-    logger.info(f"转写完成: {args.output}")
+    transcribe_video(args.url, args.model, args.output, args.work_dir, args.segment_seconds, args.log_level)
 
 
 if __name__ == "__main__":

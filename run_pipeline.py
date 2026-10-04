@@ -1,7 +1,6 @@
 import argparse
 import json
 import logging
-import subprocess
 import sys
 import os
 import shutil
@@ -9,6 +8,9 @@ import time
 import yt_dlp
 from datetime import datetime
 
+# 直接导入模块函数
+from youtube_transcribe import transcribe_video
+from telegram_push import push_result
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
 ARCHIVE_DIR = os.path.join(os.path.dirname(__file__), "archive")
@@ -257,40 +259,6 @@ def resolve_channel_to_latest_video(channel_url, logger=None, max_age_hours=12):
     raise RuntimeError(f"RSS 中未找到任何非 Shorts 视频: {rss_url}")
 
 
-def run_cmd(cmd, cwd=None, logger=None):
-    if logger is None:
-        logger = logging.getLogger(__name__)
-    cmd_str = " ".join(cmd)
-    logger.info(f"RUN: {cmd_str}")
-    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
-    if result.stdout:
-        for line in result.stdout.strip().split("\n"):
-            logger.debug(f"OUT: {line}")
-    if result.stderr:
-        for line in result.stderr.strip().split("\n"):
-            logger.warning(f"ERR: {line}")
-    if result.returncode != 0:
-        logger.error(f"Command failed (exit={result.returncode}): {cmd_str}")
-        raise RuntimeError(f"Command failed with exit code {result.returncode}")
-    logger.info(f"OK: {cmd_str}")
-    return result
-
-
-def get_next_sequence(archive_dir, base_name, date_str):
-    """获取当天的下一个序号"""
-    max_seq = 0
-    if not os.path.exists(archive_dir):
-        return 1
-    for fname in os.listdir(archive_dir):
-        if fname.startswith(f"{base_name}_{date_str}_"):
-            try:
-                seq = int(fname.split("_")[-1].split(".")[0])
-                max_seq = max(max_seq, seq)
-            except ValueError:
-                continue
-    return max_seq + 1
-
-
 def archive_files(base_dir, transcript_file, analysis_file, logger=None):
     """归档 transcript.txt 和 analysis_result.txt"""
     if logger is None:
@@ -308,6 +276,21 @@ def archive_files(base_dir, transcript_file, analysis_file, logger=None):
         dst_path = os.path.join(ARCHIVE_DIR, dst_name)
         shutil.copy2(src_file, dst_path)
         logger.info(f"归档: {dst_name} <- {src_file}")
+
+
+def get_next_sequence(archive_dir, base_name, date_str):
+    """获取当天的下一个序号"""
+    max_seq = 0
+    if not os.path.exists(archive_dir):
+        return 1
+    for fname in os.listdir(archive_dir):
+        if fname.startswith(f"{base_name}_{date_str}_"):
+            try:
+                seq = int(fname.split("_")[-1].split(".")[0])
+                max_seq = max(max_seq, seq)
+            except ValueError:
+                continue
+    return max_seq + 1
 
 
 def run_pipeline_once(url, args, logger, config):
@@ -334,7 +317,7 @@ def run_pipeline_once(url, args, logger, config):
 
     base_dir = "/home/Edcwsyh/work"
     transcript_file = os.path.join(base_dir, "transcript.txt")
-    analysis_file = os.path.join(base_dir, "analysis_result.txt")
+    analysis_file = os.path.join(base_dir, "analysis_result.md")
 
     if not args.skip_transcribe:
         logger.info("=== 步骤1: 下载音频并转写 ===")
@@ -342,12 +325,19 @@ def run_pipeline_once(url, args, logger, config):
         if os.path.exists(args.work_dir):
             logger.info(f"清理工作目录: {args.work_dir}")
             shutil.rmtree(args.work_dir, ignore_errors=True)
-        run_cmd([
-            sys.executable, "youtube_transcribe.py", url,
-            "--model", args.model,
-            "--output", transcript_file,
-            "--work-dir", args.work_dir
-        ], cwd=base_dir, logger=logger)
+        try:
+            transcribe_video(
+                url,
+                model=args.model,
+                output=transcript_file,
+                work_dir=args.work_dir,
+                segment_seconds=300,
+                log_level=args.log_level,
+                logger=logger
+            )
+        except Exception as e:
+            logger.error(f"转写失败: {e}")
+            return False, None
 
     if not os.path.exists(transcript_file):
         logger.error(f"未找到转写文件: {transcript_file}")
@@ -355,10 +345,16 @@ def run_pipeline_once(url, args, logger, config):
     logger.info(f"转写文件已就绪: {transcript_file} ({os.path.getsize(transcript_file)} bytes)")
 
     logger.info("=== 步骤2: AI分析生成报告 ===")
-    run_cmd([
+    # opencode skill 仍需通过 CLI 运行（无 Python API）
+    import subprocess
+    result = subprocess.run([
         "opencode", "run",
         "使用 newsanalysis skill 分析 transcript.txt 并生成 analysis_result.txt"
-    ], cwd=base_dir, logger=logger)
+    ], cwd=base_dir, capture_output=True, text=True)
+    if result.returncode != 0:
+        logger.error(f"AI分析失败: {result.stderr}")
+        return False, video_id
+    logger.debug(result.stdout)
 
     if not os.path.exists(analysis_file):
         logger.error(f"未生成分析报告: {analysis_file}")
@@ -366,7 +362,11 @@ def run_pipeline_once(url, args, logger, config):
     logger.info(f"分析报告已生成: {analysis_file} ({os.path.getsize(analysis_file)} bytes)")
 
     logger.info("=== 步骤3: 推送到Telegram ===")
-    run_cmd([sys.executable, "telegram_push.py", analysis_file], cwd=base_dir, logger=logger)
+    try:
+        push_result(analysis_file, log_level=args.log_level, logger=logger, config=config)
+    except Exception as e:
+        logger.error(f"推送失败: {e}")
+        return False, video_id
 
     if not args.skip_archive:
         logger.info("=== 步骤4: 归档文件 ===")

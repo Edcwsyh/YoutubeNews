@@ -1,6 +1,6 @@
 ---
 name: newsanalysis
-description: Analyze YouTube transcript from /home/Edcwsyh/work/transcript.txt and generate structured analysis report to /home/Edcwsyh/work/analysis_result.txt. Extract: 1) main topic, 2) topic with host's core points (verbatim), 3) AI search analysis on topic with commentary, 4) news overview with credibility & AI commentary, 5) video evaluation (score 100 + worth watching). Output must be well-formatted for human readability.
+description: Analyze YouTube transcript from /home/Edcwsyh/work/transcript.txt and generate structured analysis report to /home/Edcwsyh/work/analysis_result.md. Extract: 1) main topic, 2) topic with host's core points (verbatim), 3) AI search analysis on topic with commentary, 4) news overview with credibility & AI commentary, 5) video evaluation (score 100 + worth watching). Output must be well-formatted Markdown for human readability.
 ---
 # News Analysis Skill
 
@@ -9,7 +9,7 @@ Use this skill when the YouTube video transcript (`transcript.txt`) needs to be 
 
 ## What I do
 1. Read the transcript from the default path `/home/Edcwsyh/work/transcript.txt`.
-2. Generate a well-formatted report to `/home/Edcwsyh/work/analysis_result.txt` with these sections:
+2. Generate a well-formatted **Markdown** report to `/home/Edcwsyh/work/analysis_result.md` with these sections:
 
 ### 1. 本期的主题
 **简明扼要**（1-2句话）概括本期视频的核心主题。
