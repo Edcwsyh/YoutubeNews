@@ -1,6 +1,7 @@
 import json
 import logging
 import sys
+import html
 import requests
 
 
@@ -24,6 +25,22 @@ def load_config():
         return json.load(f)
 
 
+def _handle_telegram_error(resp, action, logger):
+    """处理 Telegram API 错误，返回是否为权限错误"""
+    if resp.status_code == 400:
+        try:
+            err_data = resp.json()
+            desc = err_data.get("description", "").lower()
+            if "not enough rights" in desc or "forbidden" in desc or "chat not found" in desc:
+                logger.error(f"{action} 失败: Bot 权限不足或 Chat ID 错误 - {err_data.get('description')}")
+                logger.error("请确保：1) Bot 已加入群组/频道 2) Bot 是管理员 3) 有发送消息/文件权限 4) Chat ID 正确")
+                return True  # 权限错误
+        except Exception:
+            pass
+    logger.error(f"{action} 失败: HTTP {resp.status_code} - {resp.text}")
+    return False
+
+
 def send_message(bot_token, chat_id, text, logger=None):
     if logger is None:
         logger = logging.getLogger(__name__)
@@ -36,7 +53,10 @@ def send_message(bot_token, chat_id, text, logger=None):
     }
     logger.debug(f"发送消息到 chat_id={chat_id}, 长度={len(text)}")
     resp = requests.post(url, json=payload, timeout=10)
-    resp.raise_for_status()
+    if resp.status_code != 200:
+        if _handle_telegram_error(resp, "发送消息", logger):
+            raise PermissionError("Bot 权限不足")
+        resp.raise_for_status()
     logger.info("消息发送成功")
     return resp.json()
 
@@ -51,7 +71,10 @@ def send_document(bot_token, chat_id, file_path, caption="", logger=None):
         files = {"document": f}
         data = {"chat_id": chat_id, "caption": caption}
         resp = requests.post(url, files=files, data=data, timeout=30)
-    resp.raise_for_status()
+    if resp.status_code != 200:
+        if _handle_telegram_error(resp, "发送文件", logger):
+            raise PermissionError("Bot 权限不足")
+        resp.raise_for_status()
     logger.info("文件发送成功")
     return resp.json()
 
@@ -96,7 +119,13 @@ def main():
 
     max_len = 4000
     if len(content) <= max_len:
-        send_message(bot_token, chat_id, f"<pre>{content}</pre>", logger=logger)
+        # 转义 HTML 特殊字符，避免解析错误
+        safe_content = html.escape(content)
+        try:
+            send_message(bot_token, chat_id, f"<pre>{safe_content}</pre>", logger=logger)
+        except Exception as e:
+            logger.warning(f"发送消息失败，回退为文件发送: {e}")
+            send_document(bot_token, chat_id, result_file, caption="分析报告（消息发送失败，作为文件发送）", logger=logger)
     else:
         send_document(bot_token, chat_id, result_file, caption="分析报告（内容过长，作为文件发送）", logger=logger)
 
