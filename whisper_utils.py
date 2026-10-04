@@ -60,7 +60,9 @@ def split_audio(audio_file, output_dir, segment_seconds=300, logger=None):
     if logger is None:
         logger = get_logger()
     os.makedirs(output_dir, exist_ok=True)
-    pattern = os.path.join(output_dir, "seg_%03d.webm")
+    # 使用输入文件相同的扩展名，避免容器不匹配
+    ext = os.path.splitext(audio_file)[1] or ".webm"
+    pattern = os.path.join(output_dir, f"seg_%03d{ext}")
     logger.info(f"切分音频: {audio_file} -> {pattern} (每段 {segment_seconds}s)")
     subprocess.run(
         ["ffmpeg", "-i", audio_file, "-f", "segment", "-segment_time", str(segment_seconds),
@@ -68,7 +70,7 @@ def split_audio(audio_file, output_dir, segment_seconds=300, logger=None):
         check=True,
         capture_output=True,
     )
-    segments = sorted(glob.glob(os.path.join(output_dir, "seg_*.webm")))
+    segments = sorted(glob.glob(os.path.join(output_dir, f"seg_*{ext}")))
     logger.info(f"切分完成: {len(segments)} 个片段")
     return segments
 

@@ -415,10 +415,30 @@ def main():
             logger.info("-" * 50)
             logger.info("检查新视频...")
 
-            # 解析最新视频
-            check_url = url
-            if is_channel_url(check_url):
-                check_url = resolve_channel_to_latest_video(check_url, logger=logger)
+            # 解析最新视频（带重试）
+            check_url = None
+            max_retries = 3
+            retry_delay = 60  # 初始延迟 60 秒
+            for attempt in range(max_retries):
+                try:
+                    check_url = url
+                    if is_channel_url(check_url):
+                        check_url = resolve_channel_to_latest_video(check_url, logger=logger)
+                    break  # 成功跳出重试循环
+                except Exception as e:
+                    logger.warning(f"解析视频失败 (尝试 {attempt+1}/{max_retries}): {e}")
+                    if attempt < max_retries - 1:
+                        logger.info(f"{retry_delay} 秒后重试...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # 指数退避
+                    else:
+                        logger.error(f"重试 {max_retries} 次均失败，本轮跳过")
+                        check_url = None
+
+            if check_url is None:
+                logger.info(f"等待 {args.interval} 秒后下次检查...")
+                time.sleep(args.interval)
+                continue
 
             current_video_id = extract_video_id(check_url)
             logger.info(f"最新视频ID: {current_video_id}, 上次处理: {last_video_id}")
@@ -440,8 +460,9 @@ def main():
     except KeyboardInterrupt:
         logger.info("收到中断信号，退出监听模式")
     except Exception as e:
-        logger.error(f"监听模式异常: {e}")
-        raise
+        logger.exception(f"监听模式异常，继续下一轮: {e}")
+        logger.info(f"等待 {args.interval} 秒后重试...")
+        time.sleep(args.interval)
 
 
 if __name__ == "__main__":
