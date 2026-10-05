@@ -1,7 +1,6 @@
 import json
 import logging
 import sys
-import html
 import os
 import requests
 
@@ -105,19 +104,8 @@ def push_result(result_file, log_level="INFO", logger=None, config=None):
         logger.error(f"文件不存在: {result_file}")
         raise FileNotFoundError(f"文件不存在: {result_file}")
 
-    with open(result_file, "r", encoding="utf-8") as f:
-        content = f.read()
-
-    max_len = 4000
-    if len(content) <= max_len:
-        safe_content = html.escape(content)
-        try:
-            send_message(bot_token, chat_id, f"<pre>{safe_content}</pre>", logger=logger)
-        except Exception as e:
-            logger.warning(f"发送消息失败，回退为文件发送: {e}")
-            send_document(bot_token, chat_id, result_file, caption="分析报告（消息发送失败，作为文件发送）", logger=logger)
-    else:
-        send_document(bot_token, chat_id, result_file, caption="分析报告（内容过长，作为文件发送）", logger=logger)
+    # 始终作为文件发送
+    send_document(bot_token, chat_id, result_file, caption="分析报告", logger=logger)
 
     logger.info("推送完成")
 
