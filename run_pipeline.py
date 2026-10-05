@@ -260,7 +260,7 @@ def resolve_channel_to_latest_video(channel_url, logger=None, max_age_hours=12):
 
 
 def archive_files(base_dir, transcript_file, analysis_file, logger=None):
-    """归档 transcript.txt 和 analysis_result.txt"""
+    """归档 transcript.txt 和 analysis_result.md"""
     if logger is None:
         logger = logging.getLogger(__name__)
     os.makedirs(ARCHIVE_DIR, exist_ok=True)
@@ -349,7 +349,7 @@ def run_pipeline_once(url, args, logger, config):
     import subprocess
     result = subprocess.run([
         "opencode", "run",
-        "使用 newsanalysis skill 分析 transcript.txt 并生成 analysis_result.txt"
+        "使用 newsanalysis skill 分析 transcript.txt 并生成 analysis_result.md"
     ], cwd=base_dir, capture_output=True, text=True)
     if result.returncode != 0:
         logger.error(f"AI分析失败: {result.stderr}")
