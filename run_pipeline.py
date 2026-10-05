@@ -43,14 +43,14 @@ def load_config():
 
 
 def load_state():
-    """加载流水线状态（记录最后处理的视频ID）"""
+    """加载流水线状态（记录每个频道最后处理的视频ID）"""
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             pass
-    return {"last_video_id": None}
+    return {"channels": {}}
 
 
 def save_state(state):
@@ -396,69 +396,86 @@ def main():
     logger = setup_logging(getattr(logging, args.log_level))
 
     config = load_config()
-    url = args.url or config.get("youtube_channel_url")
-    if not url or url == "https://www.youtube.com/@channel_name":
-        logger.error("未提供YouTube URL，且config.json中未配置youtube_channel_url")
+    channels = config.get("youtube_channels", [])
+    if not channels:
+        logger.error("config.json 中未配置 youtube_channels")
         sys.exit(1)
 
-    # 单次运行模式
-    if not args.monitor:
-        success, _ = run_pipeline_once(url, args, logger, config)
-        sys.exit(0 if success else 1)
+    enabled_channels = [c for c in channels if c.get("enabled", True)]
+    if not enabled_channels:
+        logger.error("没有启用的频道")
+        sys.exit(1)
 
-    # 监听模式
+    # 单次运行模式：遍历所有启用的频道
+    if not args.monitor:
+        all_success = True
+        for channel in enabled_channels:
+            channel_url = channel["url"]
+            logger.info(f"处理频道: {channel.get('name', channel_url)}")
+            success, _ = run_pipeline_once(channel_url, args, logger, config)
+            all_success = all_success and success
+        sys.exit(0 if all_success else 1)
+
+    # 监听模式：遍历所有启用的频道
     logger.info("=" * 50)
-    logger.info(f"启动监听模式: 检查间隔={args.interval}秒, URL={url}")
+    logger.info(f"启动监听模式: 检查间隔={args.interval}秒, 频道数={len(enabled_channels)}")
     logger.info("按 Ctrl+C 停止")
 
     state = load_state()
-    last_video_id = state.get("last_video_id")
+    channel_states = state.get("channels", {})
 
     try:
         while True:
             logger.info("-" * 50)
-            logger.info("检查新视频...")
+            logger.info("开始新一轮检查...")
 
-            # 解析最新视频（带重试）
-            check_url = None
-            max_retries = 3
-            retry_delay = 60  # 初始延迟 60 秒
-            for attempt in range(max_retries):
-                try:
-                    check_url = url
-                    if is_channel_url(check_url):
-                        check_url = resolve_channel_to_latest_video(check_url, logger=logger)
-                    break  # 成功跳出重试循环
-                except Exception as e:
-                    logger.warning(f"解析视频失败 (尝试 {attempt+1}/{max_retries}): {e}")
-                    if attempt < max_retries - 1:
-                        logger.info(f"{retry_delay} 秒后重试...")
-                        time.sleep(retry_delay)
-                        retry_delay *= 2  # 指数退避
-                    else:
-                        logger.error(f"重试 {max_retries} 次均失败，本轮跳过")
-                        check_url = None
+            for channel in enabled_channels:
+                channel_url = channel["url"]
+                channel_name = channel.get("name", channel_url)
+                logger.info(f"检查频道: {channel_name}")
 
-            if check_url is None:
-                logger.info(f"等待 {args.interval} 秒后下次检查...")
-                time.sleep(args.interval)
-                continue
+                # 获取该频道的上次处理视频ID
+                last_video_id = channel_states.get(channel_url)
 
-            current_video_id = extract_video_id(check_url)
-            logger.info(f"最新视频ID: {current_video_id}, 上次处理: {last_video_id}")
+                # 解析最新视频（带重试）
+                check_url = None
+                max_retries = 3
+                retry_delay = 60  # 初始延迟 60 秒
+                for attempt in range(max_retries):
+                    try:
+                        check_url = channel_url
+                        if is_channel_url(check_url):
+                            check_url = resolve_channel_to_latest_video(check_url, logger=logger)
+                        break  # 成功跳出重试循环
+                    except Exception as e:
+                        logger.warning(f"解析视频失败 (尝试 {attempt+1}/{max_retries}): {e}")
+                        if attempt < max_retries - 1:
+                            logger.info(f"{retry_delay} 秒后重试...")
+                            time.sleep(retry_delay)
+                            retry_delay *= 2  # 指数退避
+                        else:
+                            logger.error(f"重试 {max_retries} 次均失败，跳过频道: {channel_name}")
+                            check_url = None
 
-            if current_video_id and current_video_id != last_video_id:
-                logger.info(f"检测到新视频: {current_video_id}")
-                success, new_video_id = run_pipeline_once(check_url, args, logger, config)
-                if success and new_video_id:
-                    last_video_id = new_video_id
-                    state["last_video_id"] = last_video_id
-                    save_state(state)
-                    logger.info(f"已更新状态: last_video_id={last_video_id}")
-            else:
-                logger.info("无新视频，跳过")
+                if check_url is None:
+                    logger.info(f"频道 {channel_name} 解析失败，跳过")
+                    continue
 
-            logger.info(f"等待 {args.interval} 秒后下次检查...")
+                current_video_id = extract_video_id(check_url)
+                logger.info(f"频道 {channel_name} 最新视频ID: {current_video_id}, 上次处理: {last_video_id}")
+
+                if current_video_id and current_video_id != last_video_id:
+                    logger.info(f"检测到新视频: {current_video_id}")
+                    success, new_video_id = run_pipeline_once(check_url, args, logger, config)
+                    if success and new_video_id:
+                        channel_states[channel_url] = new_video_id
+                        state["channels"] = channel_states
+                        save_state(state)
+                        logger.info(f"已更新频道 {channel_name} 状态: {new_video_id}")
+                else:
+                    logger.info(f"频道 {channel_name} 无新视频，跳过")
+
+            logger.info(f"本轮检查完成，等待 {args.interval} 秒后下次检查...")
             time.sleep(args.interval)
 
     except KeyboardInterrupt:
