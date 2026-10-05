@@ -180,6 +180,10 @@ def resolve_channel_to_latest_video(channel_url, logger=None, max_age_hours=12):
     rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
     logger.debug(f"请求 RSS: {rss_url}")
     resp = requests.get(rss_url, timeout=10)
+    if resp.status_code == 404:
+        logger.warning(f"RSS feed 返回 404，可能该频道不支持 RSS feed: {rss_url}")
+        # 尝试使用 yt-dlp 作为备选方案
+        return _resolve_via_ytdlp(channel_url, logger, max_age_hours)
     resp.raise_for_status()
 
     # 3. 解析 XML
