@@ -108,34 +108,15 @@ def is_live_stream(video_url, logger=None):
                 live_status = parts[0].strip().lower()
                 concurrent = parts[1].strip()
                 release_ts = parts[2].strip()
-                
+
                 if live_status in ("is_live", "live"):
-                    # 判断是正在直播还是已结束的直播回放
-                    # 如果 release_timestamp 存在且在过去，说明是 VOD
-                    # 如果 concurrent_view_count 是 NA，可能是普通视频
-                    import time
-                    try:
-                        if release_ts and release_ts != "NA":
-                            release_time = int(release_ts)
-                            if release_time < time.time():
-                                logger.debug(f"视频为已结束的直播回放 (release_timestamp 在过去): {video_url}")
-                                return False
-                    except ValueError:
-                        pass
-                    
-                    # 如果 concurrent_view_count 是数字且较大，可能正在直播
-                    # 但 VOD 也可能有观看人数，所以不能只靠这个
-                    # 最稳妥：如果 release_timestamp 在未来，才是正在直播
-                    try:
-                        if release_ts and release_ts != "NA":
-                            release_time = int(release_ts)
-                            if release_time > time.time():
-                                logger.warning(f"检测到正在直播的视频 (未来 release_timestamp)，跳过: {video_url}")
-                                return True
-                    except ValueError:
-                        pass
-                    
-                    logger.debug(f"视频标记为 is_live 但无法确定是否正在直播，当作 VOD 处理: {video_url}")
+                    # 正在直播：live_status 明确标记为 is_live/live 即为正在进行
+                    # release_timestamp 是直播开始时间（在过去），不能用它判断
+                    logger.warning(f"检测到正在直播的视频 (live_status={live_status})，跳过: {video_url}")
+                    return True
+                if live_status in ("was_live", "post_live"):
+                    # 已结束的直播回放
+                    logger.debug(f"视频为已结束的直播回放 (live_status={live_status}): {video_url}")
                     return False
                 logger.debug(f"视频直播状态: {live_status}")
     except Exception as e:
