@@ -124,67 +124,6 @@ def is_live_stream(video_url, logger=None):
     return False
 
 
-def _resolve_via_ytdlp(channel_url, logger=None, max_age_hours=12):
-    """使用 yt-dlp 解析频道最新视频（备选方案）"""
-    if logger is None:
-        logger = logging.getLogger(__name__)
-    logger.info(f"使用 yt-dlp 解析频道: {channel_url}")
-
-    import subprocess
-    import re
-    from datetime import datetime, timezone, timedelta
-
-    # 统一转为 /videos 标签页
-    if "/@" in channel_url and not channel_url.endswith("/videos"):
-        channel_url = channel_url.rstrip("/") + "/videos"
-
-    result = subprocess.run(
-        ["yt-dlp", "--flat-playlist", "--print", "%(id)s|%(title)s|%(upload_date)s|%(live_status)s", channel_url],
-        capture_output=True, text=True, timeout=60,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"yt-dlp 解析失败: {result.stderr}")
-
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
-    for line in result.stdout.strip().split("\n"):
-        if not line:
-            continue
-        parts = line.split("|", 3)
-        if len(parts) < 4:
-            continue
-        video_id, title, upload_date, live_status = parts
-        live_status = live_status.strip().lower()
-        if live_status in ("is_live", "live"):
-            logger.debug(f"跳过正在直播: {title}")
-            continue
-        # 解析上传日期
-        try:
-            published = datetime.strptime(upload_date, "%Y%m%d").replace(tzinfo=timezone.utc)
-        except ValueError:
-            published = datetime.now(timezone.utc)
-        if published >= cutoff:
-            video_url = f"https://www.youtube.com/watch?v={video_id}"
-            logger.info(f"获取到最新视频 (yt-dlp): {title} ({video_url})")
-            return video_url
-
-    # 兜底：返回最新的非直播视频
-    for line in result.stdout.strip().split("\n"):
-        if not line:
-            continue
-        parts = line.split("|", 3)
-        if len(parts) < 4:
-            continue
-        video_id, title, upload_date, live_status = parts
-        live_status = live_status.strip().lower()
-        if live_status in ("is_live", "live"):
-            continue
-        video_url = f"https://www.youtube.com/watch?v={video_id}"
-        logger.warning(f"最近 {max_age_hours}h 无新视频，回退到最新: {title}")
-        return video_url
-
-    raise RuntimeError(f"yt-dlp 未找到有效视频: {channel_url}")
-
-
 def is_channel_url(url):
     """判断是否为频道URL"""
     return any(pattern in url for pattern in ["/@", "/channel/", "/user/", "/c/"])
@@ -222,9 +161,6 @@ def resolve_channel_to_latest_video(channel_url, logger=None, max_age_hours=12):
     rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
     logger.debug(f"请求 RSS: {rss_url}")
     resp = requests.get(rss_url, timeout=10)
-    if resp.status_code == 404:
-        logger.warning(f"RSS feed 返回 404，尝试使用 yt-dlp 解析: {rss_url}")
-        return _resolve_via_ytdlp(channel_url, logger, max_age_hours)
     resp.raise_for_status()
 
     # 3. 解析 XML
@@ -338,7 +274,7 @@ def get_next_sequence(archive_dir, base_name, date_str):
     return max_seq + 1
 
 
-def run_pipeline_once(url, args, logger, config):
+def run_pipeline_once(url, args, logger, config, channel_config=None):
     """执行单次流水线"""
     logger.info("=" * 50)
     logger.info("流水线启动")
@@ -346,9 +282,12 @@ def run_pipeline_once(url, args, logger, config):
                 f"skip_transcribe={args.skip_transcribe}, skip_archive={args.skip_archive}")
 
     # 如果是频道URL，解析获取最新视频URL
+    content_type = "all"
+    if channel_config:
+        content_type = channel_config.get("content_type", "all")
     if is_channel_url(url):
         logger.info("检测到频道URL，正在解析最新视频...")
-        url = resolve_channel_to_latest_video(url, logger=logger)
+        url = resolve_channel_to_latest_video(url, logger=logger, content_type=content_type)
         logger.info(f"将使用视频URL: {url}")
 
     video_id = extract_video_id(url)
@@ -392,13 +331,24 @@ def run_pipeline_once(url, args, logger, config):
     logger.info("=== 步骤2: AI分析生成报告 ===")
     # opencode skill 仍需通过 CLI 运行（无 Python API）
     import subprocess
-    result = subprocess.run([
-        "opencode", "run",
-        "使用 newsanalysis skill 分析 transcript.txt 并生成 analysis_result.md"
-    ], cwd=base_dir, capture_output=True, text=True)
+
+    def run_analysis(prompt, continue_session=False):
+        cmd = ["opencode", "run"]
+        if continue_session:
+            cmd.append("--continue")
+        cmd.append(prompt)
+        result = subprocess.run(cmd, cwd=base_dir, capture_output=True, text=True)
+        return result
+
+    # 第一次尝试
+    result = run_analysis("使用 newsanalysis skill 分析 transcript.txt 并生成 analysis_result.md")
     if result.returncode != 0:
-        logger.error(f"AI分析失败: {result.stderr}")
-        return False, video_id
+        logger.warning(f"AI分析首次失败，尝试继续会话重试: {result.stderr}")
+        # 重试：继续最后一个会话，发送"继续执行分析"
+        result = run_analysis("继续执行分析", continue_session=True)
+        if result.returncode != 0:
+            logger.error(f"AI分析重试失败: {result.stderr}")
+            return False, video_id
     logger.debug(result.stdout)
 
     if not os.path.exists(analysis_file):
