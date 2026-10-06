@@ -124,6 +124,67 @@ def is_live_stream(video_url, logger=None):
     return False
 
 
+def _resolve_via_ytdlp(channel_url, logger=None, max_age_hours=12):
+    """使用 yt-dlp 解析频道最新视频（备选方案）"""
+    if logger is None:
+        logger = logging.getLogger(__name__)
+    logger.info(f"使用 yt-dlp 解析频道: {channel_url}")
+
+    import subprocess
+    import re
+    from datetime import datetime, timezone, timedelta
+
+    # 统一转为 /videos 标签页
+    if "/@" in channel_url and not channel_url.endswith("/videos"):
+        channel_url = channel_url.rstrip("/") + "/videos"
+
+    result = subprocess.run(
+        ["yt-dlp", "--flat-playlist", "--print", "%(id)s|%(title)s|%(upload_date)s|%(live_status)s", channel_url],
+        capture_output=True, text=True, timeout=60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"yt-dlp 解析失败: {result.stderr}")
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+    for line in result.stdout.strip().split("\n"):
+        if not line:
+            continue
+        parts = line.split("|", 3)
+        if len(parts) < 4:
+            continue
+        video_id, title, upload_date, live_status = parts
+        live_status = live_status.strip().lower()
+        if live_status in ("is_live", "live"):
+            logger.debug(f"跳过正在直播: {title}")
+            continue
+        # 解析上传日期
+        try:
+            published = datetime.strptime(upload_date, "%Y%m%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            published = datetime.now(timezone.utc)
+        if published >= cutoff:
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+            logger.info(f"获取到最新视频 (yt-dlp): {title} ({video_url})")
+            return video_url
+
+    # 兜底：返回最新的非直播视频
+    for line in result.stdout.strip().split("\n"):
+        if not line:
+            continue
+        parts = line.split("|", 3)
+        if len(parts) < 4:
+            continue
+        video_id, title, upload_date, live_status = parts
+        live_status = live_status.strip().lower()
+        if live_status in ("is_live", "live"):
+            continue
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+        logger.warning(f"最近 {max_age_hours}h 无新视频，回退到最新: {title}")
+        return video_url
+
+    raise RuntimeError(f"yt-dlp 未找到有效视频: {channel_url}")
+
+
 def is_channel_url(url):
     """判断是否为频道URL"""
     return any(pattern in url for pattern in ["/@", "/channel/", "/user/", "/c/"])
@@ -162,8 +223,7 @@ def resolve_channel_to_latest_video(channel_url, logger=None, max_age_hours=12):
     logger.debug(f"请求 RSS: {rss_url}")
     resp = requests.get(rss_url, timeout=10)
     if resp.status_code == 404:
-        logger.warning(f"RSS feed 返回 404，可能该频道不支持 RSS feed: {rss_url}")
-        # 尝试使用 yt-dlp 作为备选方案
+        logger.warning(f"RSS feed 返回 404，尝试使用 yt-dlp 解析: {rss_url}")
         return _resolve_via_ytdlp(channel_url, logger, max_age_hours)
     resp.raise_for_status()
 
