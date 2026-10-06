@@ -340,14 +340,19 @@ def run_pipeline_once(url, args, logger, config, channel_config=None):
         result = subprocess.run(cmd, cwd=base_dir, capture_output=True, text=True)
         return result
 
-    # 第一次尝试
+    # 可配置重试次数，优先级：命令行 > config.json > 默认5
+    max_retries = getattr(args, 'ai_max_retries', None) or config.get('ai_max_retries', 5)
     result = run_analysis("使用 newsanalysis skill 分析 transcript.txt 并生成 analysis_result.md")
-    if result.returncode != 0:
-        logger.warning(f"AI分析首次失败，尝试继续会话重试: {result.stderr}")
-        # 重试：继续最后一个会话，发送"继续执行分析"
-        result = run_analysis("继续执行分析", continue_session=True)
-        if result.returncode != 0:
-            logger.error(f"AI分析重试失败: {result.stderr}")
+    
+    for attempt in range(max_retries):
+        if result.returncode == 0:
+            break
+        logger.warning(f"AI分析失败 (尝试 {attempt+1}/{max_retries}): {result.stderr}")
+        if attempt < max_retries - 1:
+            logger.info(f"重试中... (继续会话)")
+            result = run_analysis("继续执行分析", continue_session=True)
+        else:
+            logger.error(f"AI分析重试 {max_retries} 次均失败")
             return False, video_id
     logger.debug(result.stdout)
 
