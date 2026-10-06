@@ -1,0 +1,9 @@
+# Core dependencies
+yt-dlp>=2024.1.0
+faster-whisper>=1.0.0
+opencc-python-reimplemented>=0.1.0
+requests>=2.31.0
+
+# System dependencies (install via apt/brew):
+# ffmpeg (required for audio processing)
+# python3-dev (for faster-whisper compilation)
