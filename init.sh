@@ -25,11 +25,11 @@ echo "安装系统依赖..."
 if [ "$OS" = "Linux" ]; then
     if command -v apt-get &> /dev/null; then
         sudo apt-get update
-        sudo apt-get install -y ffmpeg python3-dev python3-pip git curl
+        sudo apt-get install -y ffmpeg python3-dev python3-pip python3-venv git curl
     elif command -v yum &> /dev/null; then
-        sudo yum install -y ffmpeg python3-devel python3-pip git curl
+        sudo yum install -y ffmpeg python3-devel python3-pip python3-virtualenv git curl
     elif command -v dnf &> /dev/null; then
-        sudo dnf install -y ffmpeg python3-devel python3-pip git curl
+        sudo dnf install -y ffmpeg python3-devel python3-pip python3-virtualenv git curl
     elif command -v pacman &> /dev/null; then
         sudo pacman -S --needed ffmpeg python python-pip git curl
     else
@@ -53,15 +53,29 @@ if ! command -v ffmpeg &> /dev/null; then
 fi
 ffmpeg -version | head -1
 
-# 创建虚拟环境
+# 创建或修复虚拟环境
 echo ""
-echo "创建虚拟环境..."
-if [ ! -d "venv" ]; then
-    python3 -m venv venv
-    echo "虚拟环境创建完成"
-else
-    echo "虚拟环境已存在"
+echo "检查虚拟环境..."
+if [ -d "venv" ] && [ ! -f "venv/bin/activate" ]; then
+    BACKUP_DIR="venv.incomplete.$(date +%Y%m%d%H%M%S)"
+    echo "发现不完整的 venv，保留到 $BACKUP_DIR 并重新创建..."
+    mv venv "$BACKUP_DIR"
 fi
+
+if [ ! -f "venv/bin/activate" ]; then
+    if ! python3 -m venv venv; then
+        echo "错误: 创建虚拟环境失败。请确认已安装与当前 Python 版本匹配的 venv 包。"
+        echo "Ubuntu/Debian 可尝试: sudo apt install python3-venv"
+        echo "例如 Python 3.12: sudo apt install python3.12-venv"
+        exit 1
+    fi
+fi
+
+if [ ! -f "venv/bin/activate" ]; then
+    echo "错误: 虚拟环境创建后仍缺少 venv/bin/activate，请检查 Python/venv 安装。"
+    exit 1
+fi
+echo "虚拟环境已就绪"
 
 # 激活虚拟环境并安装 Python 依赖
 echo ""
