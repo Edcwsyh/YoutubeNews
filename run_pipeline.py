@@ -4,6 +4,7 @@ import logging
 import sys
 import os
 import shutil
+import secrets
 import time
 import yt_dlp
 from datetime import datetime
@@ -332,13 +333,33 @@ def run_pipeline_once(url, args, logger, config, channel_config=None):
     # opencode skill 仍需通过 CLI 运行（无 Python API）
     import subprocess
 
-    def run_analysis(prompt, continue_session=False):
-        cmd = ["opencode", "run"]
-        if continue_session:
-            cmd.append("--continue")
+    # 为本次分析固定 session，避免 --continue 意外接续其他任务的会话。
+    session_id = "ses_" + "".join(
+        secrets.choice("_-0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+        for _ in range(26)
+    )
+
+    def run_analysis(prompt):
+        cmd = ["opencode", "run", "--session", session_id]
         cmd.append(prompt)
         result = subprocess.run(cmd, cwd=base_dir, capture_output=True, text=True)
         return result
+
+    def delete_analysis_session():
+        try:
+            result = subprocess.run(
+                ["opencode", "session", "delete", session_id],
+                cwd=base_dir,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode == 0:
+                logger.info(f"已删除 OpenCode session: {session_id}")
+            else:
+                logger.warning(f"删除 OpenCode session 失败: {result.stderr.strip()}")
+        except Exception as e:
+            logger.warning(f"删除 OpenCode session 时发生异常: {e}")
 
     # 可配置重试次数，优先级：命令行 > config.json > 默认5
     max_retries = getattr(args, 'ai_max_retries', None) or config.get('ai_max_retries', 5)
@@ -349,11 +370,12 @@ def run_pipeline_once(url, args, logger, config, channel_config=None):
             break
         logger.warning(f"AI分析失败 (尝试 {attempt+1}/{max_retries}): {result.stderr}")
         if attempt < max_retries - 1:
-            logger.info(f"重试中... (继续会话)")
-            result = run_analysis("继续执行分析", continue_session=True)
+            logger.info("重试中... (继续本次分析会话)")
+            result = run_analysis("继续执行分析")
         else:
             logger.error(f"AI分析重试 {max_retries} 次均失败")
             return False, video_id
+    delete_analysis_session()
     logger.debug(result.stdout)
 
     if not os.path.exists(analysis_file):
