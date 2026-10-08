@@ -102,6 +102,24 @@ OpenCode 的分析和 session 清理也在该工作目录运行。分析 prompt 
 - 现有 `--model` 仍用于 Whisper 音频转写，与新增的 `--ai-model` 无关。不需要修改 OpenCode 的全局配置。
 - 修改配置后需重启监听程序。未设置模型时不会改变现有调用行为。
 
+## 单独分析指定视频
+
+在当前项目工作目录运行，可按视频 ID 或完整 URL 处理单个视频：
+
+```bash
+./venv/bin/python run_pipeline.py --video-id 9Nh3i0ZO-Jg --skip-push
+./venv/bin/python run_pipeline.py 'https://www.youtube.com/watch?v=9Nh3i0ZO-Jg' --skip-push
+```
+
+- 执行下载、转写、联网分析与归档；`--skip-push` 不发送 Telegram，省略时仍按原流程推送。`--skip-archive` 可额外跳过归档。
+- 手动入口不会遍历配置中的频道，也不会读取或更新监听状态；仍需当前目录的 `config.json`，但不要求配置 `youtube_channels`。使用 `--skip-push` 时不需要 Telegram 凭据。
+- 模型优先级为 `--ai-model` > 全局 `ai_model` > OpenCode 默认，不自动匹配频道级模型或内容类型。可通过 `--ai-model` 指定想使用的模型。
+- 视频 ID 必须为 11 位；支持 `watch`、`youtu.be`、`live`、`embed` 和 `shorts` 链接形式，实际处理仍排除 Shorts、正在直播、预告和未就绪回放。
+- URL 和 `--video-id` 不能同时指定，也不能与 `--monitor` 同时使用。直接传频道 URL 时，只解析并处理该频道最新可处理内容。
+- 正常下载流程会把已获取的视频标题、URL 和发布时间传给 AI，避免只靠转写内容猜测视频背景。
+- 文件仍写入当前目录的 `transcript.txt` 和 `analysis_result.md`，会替换同名文件。不要与监听程序在同一目录同时运行，以免互相覆盖。
+- `--skip-transcribe` 会使用当前目录已有的转写稿，不重新下载或获取标题、发布时间；使用者须确认转写稿对应指定视频，程序不会验证其归属。
+
 ## 运行和测试
 
 ```bash
