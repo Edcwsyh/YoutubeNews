@@ -9,7 +9,8 @@
 | 用途 | 当前工作目录下的路径 |
 | --- | --- |
 | 配置 | `config.json` |
-| 转写与分析报告 | `transcript.txt`、`analysis_result.md` |
+| 转写 | `transcript.txt` |
+| 待发送分析报告 | `reports/主题名称.md`（AI 根据内容命名） |
 | 归档 | `archive/` |
 | 日志与监听状态 | `pipeline.log`、`.pipeline_state.json` |
 | 音频临时目录 | `tmp/yt_transcribe/`（可用 `--work-dir` 覆盖） |
@@ -102,6 +103,37 @@ OpenCode 的分析和 session 清理也在该工作目录运行。分析 prompt 
 - 现有 `--model` 仍用于 Whisper 音频转写，与新增的 `--ai-model` 无关。不需要修改 OpenCode 的全局配置。
 - 修改配置后需重启监听程序。未设置模型时不会改变现有调用行为。
 
+## 报告生成、发送与归档
+
+报告不再固定为 `analysis_result.md`。AI 根据内容命名，例如：
+
+```text
+reports/美债收益率上升与比特币机构配置.md
+```
+
+- 生成中的报告先写入 `reports/.pending/<任务标识>/`；程序确认本次只有一份非空 Markdown 后，才发布到 `reports/` 顶层，避免发送半成品或误把旧报告当成新结果。失败的暂存文件保留供排查，不进入发送队列。
+- 每次流水线进入推送步骤，发送任务都会扫描 `reports/` 顶层的全部非隐藏 `.md` 文件，逐份作为文件发送到 Telegram；不扫描子目录或符号链接。
+- **发送成功后才归档并移出 `reports/`**，格式为 `archive/YYYYMMDD_原文件名.md`，日期取实际归档当天。例如 `archive/20261008_美债收益率上升与比特币机构配置.md`。
+- 报告发布或归档时遇到同名文件，自动加 `_2`、`_3` 等后缀，不覆盖旧文件。
+- 发送失败的文件留在 `reports/`，其余文件仍继续处理；任务返回失败。已确认发送但归档失败的报告记录发送状态，下次只重试归档，不重复发送。
+- `--skip-push` 将报告留在 `reports/` 等待以后发送；`--skip-archive` 会保留已发送报告，正常后续发送任务根据 `reports/.sent.json` 跳过重复发送并归档。不要删除该状态文件，修改报告内容则视为需要重新发送。
+- 转写稿仍按 `archive/transcript_YYYYMMDD_序号.txt` 保存，本次报告生成成功后即可保存转写，不依赖 Telegram 成功。
+- 旧的根目录 `analysis_result.md` 和旧归档不自动移动、重命名或发送；如需发送旧报告，可自行复制到 `reports/`。
+
+**单独启动发送任务**（无需转写、AI 分析或频道配置）：
+
+```bash
+./venv/bin/python telegram_push.py
+```
+
+此命令读取当前目录 `config.json`，发送 `reports/` 中的待发送报告并归档。也可传具体文件路径，仅发送该文件、不归档：
+
+```bash
+./venv/bin/python telegram_push.py 'reports/某个主题.md'
+```
+
+批量发送使用文件锁，防止两个发送任务同时重复处理队列。Telegram 成功响应前发生超时，或响应后写入发送状态前进程中断，可能导致重试时重复发送；无法保证远端严格恰好一次交付。
+
 ## 单独分析指定视频
 
 在当前项目工作目录运行，可按视频 ID 或完整 URL 处理单个视频：
@@ -111,13 +143,13 @@ OpenCode 的分析和 session 清理也在该工作目录运行。分析 prompt 
 ./venv/bin/python run_pipeline.py 'https://www.youtube.com/watch?v=9Nh3i0ZO-Jg' --skip-push
 ```
 
-- 执行下载、转写、联网分析与归档；`--skip-push` 不发送 Telegram，省略时仍按原流程推送。`--skip-archive` 可额外跳过归档。
+- 执行下载、转写与联网分析；`--skip-push` 不发送 Telegram，报告留在 `reports/`。省略时发送全部待发送报告，成功后归档；`--skip-archive` 可额外跳过归档。
 - 手动入口不会遍历配置中的频道，也不会读取或更新监听状态；仍需当前目录的 `config.json`，但不要求配置 `youtube_channels`。使用 `--skip-push` 时不需要 Telegram 凭据。
 - 模型优先级为 `--ai-model` > 全局 `ai_model` > OpenCode 默认，不自动匹配频道级模型或内容类型。可通过 `--ai-model` 指定想使用的模型。
 - 视频 ID 必须为 11 位；支持 `watch`、`youtu.be`、`live`、`embed` 和 `shorts` 链接形式，实际处理仍排除 Shorts、正在直播、预告和未就绪回放。
 - URL 和 `--video-id` 不能同时指定，也不能与 `--monitor` 同时使用。直接传频道 URL 时，只解析并处理该频道最新可处理内容。
 - 正常下载流程会把已获取的视频标题、URL 和发布时间传给 AI，避免只靠转写内容猜测视频背景。
-- 文件仍写入当前目录的 `transcript.txt` 和 `analysis_result.md`，会替换同名文件。不要与监听程序在同一目录同时运行，以免互相覆盖。
+- 转写仍写入当前目录的 `transcript.txt`，会替换同名文件；报告存入 `reports/` 并独立命名。不要与监听程序在同一目录同时分析，以免转写互相覆盖。
 - `--skip-transcribe` 会使用当前目录已有的转写稿，不重新下载或获取标题、发布时间；使用者须确认转写稿对应指定视频，程序不会验证其归属。
 
 ## 运行和测试

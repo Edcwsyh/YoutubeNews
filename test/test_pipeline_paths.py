@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -55,15 +56,12 @@ class PipelineWorkingDirectoryTests(unittest.TestCase):
 
     def test_archive_uses_pipeline_working_directory(self):
         transcript = self.base_dir / "transcript.txt"
-        analysis = self.base_dir / "analysis_result.md"
         transcript.write_text("测试转写", encoding="utf-8")
-        analysis.write_text("测试报告", encoding="utf-8")
-        pipeline.archive_files(str(self.base_dir), str(transcript), str(analysis), logger=self.logger)
-        pipeline.archive_files(str(self.base_dir), str(transcript), str(analysis), logger=self.logger)
+        pipeline.archive_files(str(self.base_dir), str(transcript), logger=self.logger)
+        pipeline.archive_files(str(self.base_dir), str(transcript), logger=self.logger)
         archive = self.base_dir / "archive"
         self.assertEqual(len(list(archive.glob("transcript_*.txt"))), 2)
-        self.assertEqual(len(list(archive.glob("analysis_*.md"))), 2)
-        self.assertTrue(all(p.read_text(encoding="utf-8") == "测试报告" for p in archive.glob("analysis_*.md")))
+        self.assertTrue(all(p.read_text(encoding="utf-8") == "测试转写" for p in archive.glob("transcript_*.txt")))
 
     def run_once(self, results=(1, 0)):
         commands = []
@@ -82,7 +80,8 @@ class PipelineWorkingDirectoryTests(unittest.TestCase):
             if command[:2] == ["opencode", "run"]:
                 code = next(run_results)
                 if code == 0:
-                    (self.base_dir / "analysis_result.md").write_text("本次报告", encoding="utf-8")
+                    staging_dir = Path(re.search(r"本次报告输出目录为 (.*?)。", commands[0][-1]).group(1))
+                    (staging_dir / "本次主题.md").write_text("本次报告", encoding="utf-8")
                 return subprocess.CompletedProcess(command, code, stdout="", stderr="failure" if code else "")
             self.assertEqual(command[:3], ["opencode", "session", "delete"])
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
@@ -93,7 +92,7 @@ class PipelineWorkingDirectoryTests(unittest.TestCase):
             }),
             patch.object(pipeline, "transcribe_video", side_effect=transcribe) as transcribe_mock,
             patch("subprocess.run", side_effect=execute) as run,
-            patch.object(pipeline, "push_result") as push,
+            patch("telegram_push.push_result") as push,
         ):
             result = pipeline.run_pipeline_once(
                 "https://www.youtube.com/watch?v=clip", self.args, self.logger, self.config,
@@ -109,12 +108,13 @@ class PipelineWorkingDirectoryTests(unittest.TestCase):
         self.assertFalse((temporary_audio / "old_audio.webm").exists())
         self.assertEqual(len(commands), 3)
         self.assertIn(str(self.base_dir / "transcript.txt"), commands[0][-1])
-        self.assertIn(str(self.base_dir / "analysis_result.md"), commands[0][-1])
+        self.assertIn(str(self.base_dir / "reports" / ".pending"), commands[0][-1])
         session = commands[0][commands[0].index("--session") + 1]
         self.assertEqual(commands[1][commands[1].index("--session") + 1], session)
         self.assertEqual(commands[2], ["opencode", "session", "delete", session])
-        self.assertEqual(push.call_args.args[0], str(self.base_dir / "analysis_result.md"))
-        self.assertEqual(len(list((self.base_dir / "archive").glob("analysis_*.md"))), 1)
+        self.assertEqual(push.call_args.args[0], str(self.base_dir / "reports" / "本次主题.md"))
+        self.assertEqual(len(list((self.base_dir / "archive").glob("????????_本次主题.md"))), 1)
+        self.assertEqual(list((self.base_dir / "reports").glob("*.md")), [])
         transcribe.assert_called_once()
         self.assertEqual(os.getcwd(), str(self.base_dir))
 
@@ -170,7 +170,7 @@ class PipelineWorkingDirectoryTests(unittest.TestCase):
         self.assertNotIn("/home/Edcwsyh/work", content)
         self.assertIn("不是本 skill 文件所在目录", content)
         self.assertIn("`transcript.txt`", content)
-        self.assertIn("`analysis_result.md`", content)
+        self.assertIn("`reports/`", content)
 
 
 if __name__ == "__main__":

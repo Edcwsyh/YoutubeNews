@@ -2,6 +2,7 @@ import logging
 import subprocess
 import unittest
 from types import SimpleNamespace
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import run_pipeline as pipeline
@@ -131,7 +132,9 @@ class AIModelConfigTests(unittest.TestCase):
             patch.object(pipeline.os.path, "exists", return_value=True),
             patch.object(pipeline.os.path, "getsize", return_value=100),
             patch.object(pipeline, "transcribe_video") as transcribe,
-            patch.object(pipeline, "push_result") as push,
+            patch.object(pipeline, "push_reports", return_value=True) as push,
+            patch.object(pipeline, "ensure_directory", side_effect=lambda path: Path(path)),
+            patch.object(pipeline, "publish_report", return_value="reports/本次主题.md"),
             patch.object(pipeline, "archive_files") as archive,
         ):
             result = pipeline.run_pipeline_once(
