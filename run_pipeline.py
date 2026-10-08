@@ -18,10 +18,11 @@ from youtube_channel import (
     validate_content_type,
 )
 
-CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
-ARCHIVE_DIR = os.path.join(os.path.dirname(__file__), "archive")
-LOG_FILE = os.path.join(os.path.dirname(__file__), "pipeline.log")
-STATE_FILE = os.path.join(os.path.dirname(__file__), ".pipeline_state.json")
+# 相对路径始终基于调用者当前工作目录，不基于脚本所在目录。
+CONFIG_FILE = "config.json"
+ARCHIVE_DIR = "archive"
+LOG_FILE = "pipeline.log"
+STATE_FILE = ".pipeline_state.json"
 
 
 def setup_logging(level=logging.INFO):
@@ -46,6 +47,31 @@ def setup_logging(level=logging.INFO):
 def load_config():
     with open(CONFIG_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def resolve_ai_model(args, config, channel_config=None):
+    """命令行 > 频道 > 全局；未指定或 null 时继承下一层配置。"""
+    sources = (
+        getattr(args, "ai_model", None),
+        (channel_config or {}).get("ai_model"),
+        config.get("ai_model"),
+    )
+    model = next((value for value in sources if value is not None), None)
+    if model is None:
+        return None
+    if not isinstance(model, str):
+        raise ValueError("ai_model 必须是 provider/model 或 provider/model#variant 格式的字符串")
+    model = model.strip()
+    provider, separator, model_variant = model.partition("/")
+    model_id, variant_separator, variant = model_variant.partition("#")
+    if (
+        not separator or not provider or "#" in provider
+        or not model_id or not all(model_id.split("/"))
+        or (variant_separator and (not variant or "#" in variant))
+        or any(char.isspace() or not char.isprintable() for char in model)
+    ):
+        raise ValueError(f"无效的 ai_model={model!r}，应为 provider/model 或 provider/model#variant")
+    return model
 
 
 def load_state():
@@ -105,17 +131,18 @@ def archive_files(base_dir, transcript_file, analysis_file, logger=None):
     """归档 transcript.txt 和 analysis_result.md"""
     if logger is None:
         logger = logging.getLogger(__name__)
-    os.makedirs(ARCHIVE_DIR, exist_ok=True)
+    archive_dir = os.path.join(base_dir, ARCHIVE_DIR)
+    os.makedirs(archive_dir, exist_ok=True)
     date_str = datetime.now().strftime("%Y%m%d")
 
     for src_file, base_name in [(transcript_file, "transcript"), (analysis_file, "analysis")]:
         if not os.path.exists(src_file):
             logger.warning(f"源文件不存在，跳过归档: {src_file}")
             continue
-        seq = get_next_sequence(ARCHIVE_DIR, base_name, date_str)
+        seq = get_next_sequence(archive_dir, base_name, date_str)
         ext = os.path.splitext(src_file)[1]
         dst_name = f"{base_name}_{date_str}_{seq}{ext}"
-        dst_path = os.path.join(ARCHIVE_DIR, dst_name)
+        dst_path = os.path.join(archive_dir, dst_name)
         shutil.copy2(src_file, dst_path)
         logger.info(f"归档: {dst_name} <- {src_file}")
 
@@ -148,6 +175,7 @@ def run_pipeline_once(url, args, logger, config, channel_config=None):
         content_type = channel_config.get("content_type", "all")
     try:
         validate_content_type(content_type)
+        ai_model = resolve_ai_model(args, config, channel_config)
     except ValueError as e:
         logger.error(str(e))
         return False, None
@@ -175,22 +203,29 @@ def run_pipeline_once(url, args, logger, config, channel_config=None):
             logger.info(f"内容不符合配置或尚不可处理，跳过本次处理: live_status={status}")
             return False, video_id
 
-    base_dir = "/home/Edcwsyh/work"
+    base_dir = os.getcwd()
     transcript_file = os.path.join(base_dir, "transcript.txt")
     analysis_file = os.path.join(base_dir, "analysis_result.md")
+    work_dir = os.path.abspath(args.work_dir)
+    logger.info(f"当前工作目录: {base_dir}")
 
     if not args.skip_transcribe:
+        # 音频目录会被清理，禁止把当前工作目录或其父目录作为清理目标。
+        cleanup_target = os.path.realpath(work_dir)
+        if os.path.commonpath([os.path.realpath(base_dir), cleanup_target]) == cleanup_target:
+            logger.error(f"音频临时目录不能是当前工作目录或其父目录: {work_dir}")
+            return False, video_id
         logger.info("=== 步骤1: 下载音频并转写 ===")
         # 清理工作目录
-        if os.path.exists(args.work_dir):
-            logger.info(f"清理工作目录: {args.work_dir}")
-            shutil.rmtree(args.work_dir, ignore_errors=True)
+        if os.path.exists(work_dir):
+            logger.info(f"清理音频临时目录: {work_dir}")
+            shutil.rmtree(work_dir, ignore_errors=True)
         try:
             transcribe_video(
                 url,
                 model=args.model,
                 output=transcript_file,
-                work_dir=args.work_dir,
+                work_dir=work_dir,
                 segment_seconds=300,
                 log_level=args.log_level,
                 logger=logger
@@ -205,6 +240,7 @@ def run_pipeline_once(url, args, logger, config, channel_config=None):
     logger.info(f"转写文件已就绪: {transcript_file} ({os.path.getsize(transcript_file)} bytes)")
 
     logger.info("=== 步骤2: AI分析生成报告 ===")
+    logger.info(f"AI分析模型: {ai_model if ai_model is not None else 'OpenCode 默认模型'}")
     # opencode skill 仍需通过 CLI 运行（无 Python API）
     import subprocess
 
@@ -216,6 +252,9 @@ def run_pipeline_once(url, args, logger, config, channel_config=None):
 
     def run_analysis(prompt):
         cmd = ["opencode", "run", "--session", session_id]
+        # 模型在本次流水线开始时解析一次，所有重试保持同一模型和会话。
+        if ai_model is not None:
+            cmd.extend(["--model", ai_model])
         cmd.append(prompt)
         result = subprocess.run(cmd, cwd=base_dir, capture_output=True, text=True)
         return result
@@ -238,7 +277,10 @@ def run_pipeline_once(url, args, logger, config, channel_config=None):
 
     # 可配置重试次数，优先级：命令行 > config.json > 默认5
     max_retries = getattr(args, 'ai_max_retries', None) or config.get('ai_max_retries', 5)
-    result = run_analysis("使用 newsanalysis skill 分析 transcript.txt 并生成 analysis_result.md")
+    result = run_analysis(
+        f"当前工作目录为 {base_dir}。使用 newsanalysis skill 分析 {transcript_file} "
+        f"并生成 {analysis_file}。输入输出位于当前工作目录，不是 skill 文件所在目录。"
+    )
     
     for attempt in range(max_retries):
         if result.returncode == 0:
@@ -276,8 +318,12 @@ def run_pipeline_once(url, args, logger, config, channel_config=None):
 def main():
     parser = argparse.ArgumentParser(description="完整流水线：下载转写 -> AI分析 -> Telegram推送 -> 归档")
     parser.add_argument("url", nargs="?", help="YouTube视频/频道URL（不传则读取配置文件）")
-    parser.add_argument("--model", default="base", choices=["tiny", "base", "small", "medium", "large-v3"])
-    parser.add_argument("--work-dir", default="/tmp/yt_transcribe", help="工作目录")
+    parser.add_argument("--model", default="base", choices=["tiny", "base", "small", "medium", "large-v3"],
+                        help="Whisper 音频转写模型")
+    parser.add_argument("--ai-model", metavar="PROVIDER/MODEL[#VARIANT]",
+                        help="OpenCode AI分析模型，覆盖频道和全局 ai_model 配置")
+    parser.add_argument("--work-dir", default="tmp/yt_transcribe",
+                        help="音频临时目录（默认当前工作目录下的 tmp/yt_transcribe）")
     parser.add_argument("--skip-transcribe", action="store_true", help="跳过转写，直接用现有transcript.txt")
     parser.add_argument("--skip-archive", action="store_true", help="跳过归档")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -299,10 +345,11 @@ def main():
         logger.error("没有启用的频道")
         sys.exit(1)
 
-    # 在任何下载/分析之前检查配置，不能把拼错的类型默认为 all。
+    # 在任何下载/分析之前检查类型和实际使用的 AI 模型配置。
     for channel in enabled_channels:
         try:
             validate_content_type(channel.get("content_type", "all"))
+            resolve_ai_model(args, config, channel)
         except ValueError as e:
             logger.error(f"频道 {channel.get('name', channel['url'])} 配置错误: {e}")
             sys.exit(1)
