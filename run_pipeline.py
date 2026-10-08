@@ -6,12 +6,17 @@ import os
 import shutil
 import secrets
 import time
-import yt_dlp
 from datetime import datetime
 
 # 直接导入模块函数
 from youtube_transcribe import transcribe_video
 from telegram_push import push_result
+from youtube_channel import (
+    get_video_metadata,
+    is_processable_video,
+    resolve_channel_to_latest_video,
+    validate_content_type,
+)
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
 ARCHIVE_DIR = os.path.join(os.path.dirname(__file__), "archive")
@@ -91,154 +96,9 @@ def extract_video_id(url):
     return None
 
 
-def is_live_stream(video_url, logger=None):
-    """检查视频是否为正在直播的流（排除已结束的直播回放 VOD）"""
-    if logger is None:
-        logger = logging.getLogger(__name__)
-    try:
-        import subprocess
-        result = subprocess.run(
-            ["yt-dlp", "--skip-download", "--print", "%(live_status)s|%(concurrent_view_count)s|%(release_timestamp)s", video_url],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode == 0:
-            parts = result.stdout.strip().split("|")
-            if len(parts) >= 3:
-                live_status = parts[0].strip().lower()
-                concurrent = parts[1].strip()
-                release_ts = parts[2].strip()
-
-                if live_status in ("is_live", "live"):
-                    # 正在直播：live_status 明确标记为 is_live/live 即为正在进行
-                    # release_timestamp 是直播开始时间（在过去），不能用它判断
-                    logger.warning(f"检测到正在直播的视频 (live_status={live_status})，跳过: {video_url}")
-                    return True
-                if live_status in ("was_live", "post_live"):
-                    # 已结束的直播回放
-                    logger.debug(f"视频为已结束的直播回放 (live_status={live_status}): {video_url}")
-                    return False
-                logger.debug(f"视频直播状态: {live_status}")
-    except Exception as e:
-        logger.debug(f"检查直播状态失败: {e}")
-    return False
-
-
 def is_channel_url(url):
     """判断是否为频道URL"""
     return any(pattern in url for pattern in ["/@", "/channel/", "/user/", "/c/"])
-
-
-def resolve_channel_to_latest_video(channel_url, logger=None, max_age_hours=12):
-    """解析频道URL，获取最新视频的URL（用 RSS 极速获取，过滤最近 N 小时，排除 Shorts）"""
-    if logger is None:
-        logger = logging.getLogger(__name__)
-    logger.info(f"解析频道获取最新视频: {channel_url}")
-
-    import requests
-    import xml.etree.ElementTree as ET
-    from datetime import datetime, timezone, timedelta
-    import re
-
-    # 1. 从 handle URL 提取 channel ID
-    if "/@" in channel_url:
-        handle_url = channel_url.rstrip("/")
-        logger.debug(f"获取频道页面: {handle_url}")
-        resp = requests.get(handle_url, timeout=10)
-        resp.raise_for_status()
-        # 从页面提取 channel ID
-        match = re.search(r'channel/(UC[0-9A-Za-z_-]{22})', resp.text)
-        if not match:
-            raise RuntimeError(f"无法从页面提取 channel ID: {handle_url}")
-        channel_id = match.group(1)
-        logger.info(f"解析到 Channel ID: {channel_id}")
-    elif "/channel/" in channel_url:
-        channel_id = channel_url.split("/channel/")[-1].split("/")[0]
-    else:
-        raise RuntimeError(f"不支持的频道 URL 格式: {channel_url}")
-
-    # 2. 请求 RSS feed（主频道 feed，包含所有内容，后续过滤 Shorts）
-    rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
-    logger.debug(f"请求 RSS: {rss_url}")
-    resp = requests.get(rss_url, timeout=10)
-    resp.raise_for_status()
-
-    # 3. 解析 XML
-    root = ET.fromstring(resp.content)
-    ns = {"atom": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015"}
-
-    # 4. 遍历 entry，找最近 max_age_hours 小时内的非 Shorts 视频
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
-    logger.debug(f"时间截止线: {cutoff.isoformat()}")
-
-    for entry in root.findall("atom:entry", ns):
-        video_id_elem = entry.find("yt:videoId", ns)
-        title_elem = entry.find("atom:title", ns)
-        published_elem = entry.find("atom:published", ns)
-        link_elem = entry.find("atom:link", ns)
-
-        if video_id_elem is None or title_elem is None:
-            continue
-
-        video_id = video_id_elem.text
-        title = title_elem.text
-
-        # 解析发布时间
-        published_str = published_elem.text if published_elem is not None else None
-        if published_str:
-            try:
-                published = datetime.fromisoformat(published_str.replace("Z", "+00:00"))
-            except ValueError:
-                published = datetime.now(timezone.utc)
-        else:
-            published = datetime.now(timezone.utc)
-
-        # 过滤 Shorts：检查链接或标题
-        is_short = False
-        if link_elem is not None:
-            href = link_elem.get("href", "")
-            if "/shorts/" in href:
-                is_short = True
-        if "#shorts" in title.lower() or "#shortsvideo" in title.lower():
-            is_short = True
-
-        logger.debug(f"候选: {title} ({video_id}) @ {published.isoformat()} short={is_short}")
-
-        if is_short:
-            continue
-
-        if published >= cutoff:
-            video_url = f"https://www.youtube.com/watch?v={video_id}"
-            logger.info(f"获取到最新视频 (最近 {max_age_hours}h): {title} ({video_url})")
-            return video_url
-
-    # 如果最近 N 小时没有视频，返回最新的非 Shorts 视频
-    for entry in root.findall("atom:entry", ns):
-        video_id_elem = entry.find("yt:videoId", ns)
-        title_elem = entry.find("atom:title", ns)
-        link_elem = entry.find("atom:link", ns)
-
-        if video_id_elem is None or title_elem is None:
-            continue
-
-        video_id = video_id_elem.text
-        title = title_elem.text
-
-        is_short = False
-        if link_elem is not None:
-            href = link_elem.get("href", "")
-            if "/shorts/" in href:
-                is_short = True
-        if "#shorts" in title.lower() or "#shortsvideo" in title.lower():
-            is_short = True
-
-        if not is_short:
-            video_url = f"https://www.youtube.com/watch?v={video_id}"
-            logger.warning(f"最近 {max_age_hours}h 无新视频，回退到最新非Shorts: {title} ({video_url})")
-            return video_url
-
-    raise RuntimeError(f"RSS 中未找到任何非 Shorts 视频: {rss_url}")
 
 
 def archive_files(base_dir, transcript_file, analysis_file, logger=None):
@@ -286,19 +146,34 @@ def run_pipeline_once(url, args, logger, config, channel_config=None):
     content_type = "all"
     if channel_config:
         content_type = channel_config.get("content_type", "all")
+    try:
+        validate_content_type(content_type)
+    except ValueError as e:
+        logger.error(str(e))
+        return False, None
     if is_channel_url(url):
         logger.info("检测到频道URL，正在解析最新视频...")
-        url = resolve_channel_to_latest_video(url, logger=logger, content_type=content_type)
+        try:
+            url = resolve_channel_to_latest_video(url, logger=logger, content_type=content_type)
+        except Exception as e:
+            logger.error(f"解析频道失败: {e}")
+            return False, None
+        if url is None:
+            logger.info("没有符合配置的可处理内容，跳过本次处理")
+            return True, None
         logger.info(f"将使用视频URL: {url}")
 
     video_id = extract_video_id(url)
     if video_id:
         logger.info(f"视频ID: {video_id}")
 
-    # 检查是否为正在直播
-    if not args.skip_transcribe and is_live_stream(url, logger=logger):
-        logger.info("检测到正在直播，跳过本次处理")
-        return False, video_id
+    # 直接传入视频 URL 时也检查类型和回放是否已就绪；无法确认则不下载。
+    if not args.skip_transcribe:
+        metadata = get_video_metadata(url, logger=logger)
+        if not is_processable_video(metadata, content_type):
+            status = metadata["live_status"] if metadata else "unknown"
+            logger.info(f"内容不符合配置或尚不可处理，跳过本次处理: live_status={status}")
+            return False, video_id
 
     base_dir = "/home/Edcwsyh/work"
     transcript_file = os.path.join(base_dir, "transcript.txt")
@@ -424,13 +299,21 @@ def main():
         logger.error("没有启用的频道")
         sys.exit(1)
 
+    # 在任何下载/分析之前检查配置，不能把拼错的类型默认为 all。
+    for channel in enabled_channels:
+        try:
+            validate_content_type(channel.get("content_type", "all"))
+        except ValueError as e:
+            logger.error(f"频道 {channel.get('name', channel['url'])} 配置错误: {e}")
+            sys.exit(1)
+
     # 单次运行模式：遍历所有启用的频道
     if not args.monitor:
         all_success = True
         for channel in enabled_channels:
             channel_url = channel["url"]
             logger.info(f"处理频道: {channel.get('name', channel_url)}")
-            success, _ = run_pipeline_once(channel_url, args, logger, config)
+            success, _ = run_pipeline_once(channel_url, args, logger, config, channel_config=channel)
             all_success = all_success and success
         sys.exit(0 if all_success else 1)
 
@@ -463,7 +346,11 @@ def main():
                     try:
                         check_url = channel_url
                         if is_channel_url(check_url):
-                            check_url = resolve_channel_to_latest_video(check_url, logger=logger)
+                            check_url = resolve_channel_to_latest_video(
+                                check_url,
+                                logger=logger,
+                                content_type=channel.get("content_type", "all"),
+                            )
                         break  # 成功跳出重试循环
                     except Exception as e:
                         logger.warning(f"解析视频失败 (尝试 {attempt+1}/{max_retries}): {e}")
@@ -476,7 +363,7 @@ def main():
                             check_url = None
 
                 if check_url is None:
-                    logger.info(f"频道 {channel_name} 解析失败，跳过")
+                    logger.info(f"频道 {channel_name} 无可处理内容或解析失败，跳过")
                     continue
 
                 current_video_id = extract_video_id(check_url)
@@ -484,7 +371,9 @@ def main():
 
                 if current_video_id and current_video_id != last_video_id:
                     logger.info(f"检测到新视频: {current_video_id}")
-                    success, new_video_id = run_pipeline_once(check_url, args, logger, config)
+                    success, new_video_id = run_pipeline_once(
+                        check_url, args, logger, config, channel_config=channel,
+                    )
                     if success and new_video_id:
                         channel_states[channel_url] = new_video_id
                         state["channels"] = channel_states
